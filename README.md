@@ -1,5 +1,10 @@
 # 🐕 DOGKONG
 
+wallet: https://dogkongwallet.duckdns.org/carteira
+
+explore: https://dogkong.duckdns.org/
+
+
 **DogKong v2** — Cryptocurrency with miner, wallet, and P2P network.
 
 ## 🚀 Download
