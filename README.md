@@ -1,4 +1,4 @@
-# 🐕🦍 DogKong v2.3
+# 🐕🦍 DogKong v2.23
 
 Cryptocurrency with Bitcoin-style difficulty (bits/target + LWMA), CPU+RAM PoW.
 
