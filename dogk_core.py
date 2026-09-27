@@ -59,9 +59,10 @@ P2P_PORT = 18555
 CHAIN_ID = "DOGK-V2-MAINNET"
 
 if getattr(sys, 'frozen', False):
-    DATA = os.path.join(os.path.dirname(sys.executable), "dogk_data_v2")
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
 else:
-    DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dogk_data_v2")
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA = os.path.join(BASE_DIR, "dogk_data_v2")
 WALLET_FILE = os.path.join(DATA, "wallet.json")
 CHAIN_FILE = os.path.join(DATA, "blockchain.json")
 MEMPOOL_FILE = os.path.join(DATA, "mempool.json")
@@ -129,7 +130,7 @@ PBKDF2_ITER = 600_000
 MAX_MSG_BYTES = 10_000_000
 RATE_LIMIT_PER_SEC = 20
 
-DEFAULT_SEEDS = ["seeddogkong.duckdns.org"]
+DEFAULT_SEEDS = ["seeddogkong.duckdns.org", "167.234.244.29"]
     
 
 
@@ -137,11 +138,11 @@ DEFAULT_SEEDS = ["seeddogkong.duckdns.org"]
 # 5 IDIOMAS
 # ============================================================
 LANGUAGES = {
-    "pt": "ðŸ‡§ðŸ‡· PortuguÃªs",
-    "en": "ðŸ‡ºðŸ‡¸ English",
-    "es": "ðŸ‡ªðŸ‡¸ EspaÃ±ol",
-    "zh": "ðŸ‡¨ðŸ‡³ ä¸­æ–‡",
-    "ru": "ðŸ‡·ðŸ‡º Ð ÑƒÑÑÐºÐ¸Ð¹",
+    "pt": "Portugues",
+    "en": "English",
+    "es": "Espanol",
+    "zh": "Zhongwen",
+    "ru": "Russkiy",
 }
 
 TRANSLATIONS = {
@@ -391,45 +392,50 @@ load_lang()
 # NCLEO DE DIFICULDADE  BITS/TARGET ESTILO BITCOIN + LWMA
 # ============================================================
 def target_para_bits(target):
-    """Converte target de 256 bits para o campo 'bits' de 4 bytes."""
+    """Implementacao correta (Bitcoin Core)."""
     if target > TARGET_MAX_BTC:
         target = TARGET_MAX_BTC
     if target < 1:
         target = 1
-    s = f"{target:x}"
-    if len(s) % 2 != 0:
-        s = "0" + s
-    tamanho = len(s) // 2
-    mantissa = s[:6]
-    if int(mantissa, 16) > 0x7FFFFF:
-        mantissa = "00" + mantissa[:4]
-        tamanho += 1
-    return (tamanho << 24) | int(mantissa, 16)
+    nbits = target.bit_length()
+    if nbits <= 3:
+        exp = 3
+        mant = target << (8 * (3 - nbits))
+    else:
+        exp = (nbits + 7) // 8
+        mant = target >> (8 * (exp - 3))
+    if mant & 0x800000:
+        mant >>= 8
+        exp += 1
+    return (exp << 24) | (mant & 0xFFFFFF)
 
 
 def bits_para_target(bits):
-    """Converte bits de 4 bytes para target de 256 bits."""
-    tamanho = bits >> 24
-    mantissa = bits & 0xFFFFFF
-    return mantissa * (256 ** (tamanho - 3))
+    """Implementacao correta (Bitcoin Core)."""
+    exp = bits >> 24
+    mant = bits & 0xFFFFFF
+    if exp <= 3:
+        return mant >> (8 * (3 - exp))
+    else:
+        return mant << (8 * (exp - 3))
 
 
 def calcular_dificuldade_alvo(chain, candidate_time=None):
     """
-    DOGK - dificuldade determinÃ­stica
+    DogKong - dificuldade deterministica estilo Bitcoin
 
-    NORMAL:
-      - alvo: 60 segundos por bloco
-      - retarget: a cada 100 blocos
-      - janela: 100 intervalos completos
-      - ajuste: 0,25x atÃ© 4x
+    REGRA NORMAL:
+      - Retarget a cada 100 blocos (100, 200, 300...)
+      - Janela de 101 blocos = 100 intervalos
+      - Alvo: 60 segundos por bloco
+      - Ajuste limitado a 4x (Bitcoin style)
+      - Matematica 100% inteira (sem float)
 
-    EMERGÃŠNCIA:
-      - apÃ³s mais de 150 segundos sem bloco
-      - permite 1 bloco em dificuldade mÃ­nima
-      - nÃ£o permite dois blocos de emergÃªncia consecutivos
-      - nÃ£o usa relÃ³gio local
-      - todos os nÃ³s calculam a mesma regra
+    REGRA DE EMERGENCIA:
+      - Se passar mais de 150 segundos sem bloco
+      - Dificuldade cai 2x (nao 1000x)
+      - Maximo 1 emergencia a cada 10 blocos
+      - Nao usa relogio local - deterministico
     """
 
     altura = len(chain)
@@ -438,113 +444,112 @@ def calcular_dificuldade_alvo(chain, candidate_time=None):
         return INITIAL_DIFFICULTY
 
     ultimo = chain[-1]
+    ultimo_bits = int(ultimo.get("bits", INITIAL_DIFFICULTY))
+    ultimo_time = int(ultimo.get("time", 0))
 
-    ultimo_bits = int(
-        ultimo.get("bits", INITIAL_DIFFICULTY)
-    )
-
-    ultimo_time = int(
-        ultimo.get("time", 0)
-    )
-
-    bits_minimos = target_para_bits(
-        TARGET_MAX_BTC
-    )
+    bits_minimos = target_para_bits(TARGET_MAX_BTC)
 
     # =========================================================
-    # 1. RETARGET NORMAL â€” A CADA 100 INTERVALOS
+    # 1. RETARGET A CADA 100 BLOCOS
     # =========================================================
 
-    if altura >= 501 and altura % 500 == 0:
+    if altura >= 101 and altura % 100 == 0:
 
-        # 501 blocos = exatamente 500 intervalos
-        janela = chain[-501:]
+        janela = chain[-101:]
 
-        tempo_real = (
-            int(janela[-1]["time"])
-            - int(janela[0]["time"])
-        )
+        if len(janela) != 101:
+            return ultimo_bits
 
-        tempo_esperado = 500 * BLOCK_TIME
+        try:
+            t_first = int(janela[0]["time"])
+            t_last = int(janela[-1]["time"])
+        except (KeyError, TypeError, ValueError):
+            return ultimo_bits
 
-        if tempo_real > 0:
+        tempo_real = t_last - t_first
+        tempo_esperado = 100 * BLOCK_TIME
 
-            fator = tempo_real / tempo_esperado
+        if tempo_real <= 0:
+            return ultimo_bits
 
-            # Limita o ajuste entre 1/4 e 4 vezes
-            fator = max(
-                0.25,
-                min(fator, 4.0)
-            )
+        target_atual = bits_para_target(ultimo_bits)
+        if target_atual <= 0:
+            return ultimo_bits
 
-            target_atual = bits_para_target(
-                ultimo_bits
-            )
+        novo_target = (target_atual * tempo_real) // tempo_esperado
 
-            novo_target = int(
-                target_atual * fator
-            )
+        max_target = target_atual * 4
+        min_target = target_atual // 4
 
-            novo_target = max(
-                1,
-                min(
-                    novo_target,
-                    TARGET_MAX_BTC
-                )
-            )
+        if novo_target > max_target:
+            novo_target = max_target
+        elif novo_target < min_target:
+            novo_target = min_target
 
-            ultimo_bits = target_para_bits(
-                novo_target
-            )
+        if novo_target < 1:
+            novo_target = 1
+        if novo_target > TARGET_MAX_BTC:
+            novo_target = TARGET_MAX_BTC
+
+        try:
+            novo_bits = target_para_bits(novo_target)
+        except (TypeError, ValueError, OverflowError):
+            return ultimo_bits
+
+        if int(novo_bits) <= 0:
+            return ultimo_bits
+
+        return int(novo_bits)
 
     # =========================================================
-    # 2. EMERGÃŠNCIA â€” MAIS DE 150 SEGUNDOS
+    # 2. EMERGENCIA SUAVE (150s+ sem bloco)
     # =========================================================
 
     if candidate_time is not None:
 
         candidate_time = int(candidate_time)
 
-        # Timestamp nÃ£o pode voltar
         if candidate_time < ultimo_time:
             return ultimo_bits
 
         atraso = candidate_time - ultimo_time
-
         STALL_LIMIT = 150
 
         if atraso > STALL_LIMIT:
 
-            # Nao permite dois blocos de emergencia seguidos
-            if len(chain) >= 2:
+            # Anti-loop: verifica se ultimos 10 blocos tiveram emergencia
+            ja_teve_emergencia_recente = False
+            lookback = min(10, len(chain))
+            for j in range(1, lookback + 1):
+                b_check = chain[-j]
+                bits_check = int(b_check.get("bits", INITIAL_DIFFICULTY))
+                if bits_check != ultimo_bits:
+                    target_check = bits_para_target(bits_check)
+                    target_normal = bits_para_target(ultimo_bits)
+                    if target_check > target_normal:
+                        ja_teve_emergencia_recente = True
+                        break
 
-                bits_anterior = int(
-                    chain[-2].get(
-                        "bits",
-                        INITIAL_DIFFICULTY
-                    )
-                )
+            if ja_teve_emergencia_recente:
+                return ultimo_bits
 
-                # Se o bloco anterior foi emergencia, volta ao normal
-                if bits_anterior == bits_minimos:
-                    return ultimo_bits
-
-            # Forca um bits MAIS FACIL que o atual
-            # Pega o target atual e multiplica por 1000
             target_atual = bits_para_target(ultimo_bits)
-            novo_target = int(target_atual * 1000)
-            novo_target = max(1, min(novo_target, TARGET_MAX_BTC))
-            
+            novo_target = target_atual * 2
+
+            if novo_target < 1:
+                novo_target = 1
+            if novo_target > TARGET_MAX_BTC:
+                novo_target = TARGET_MAX_BTC
+
             bits_emergencia = target_para_bits(novo_target)
-            
-            # Se o bits_emergencia for igual ao bits_minimos, usa o bits_minimos
+
             if bits_emergencia == bits_minimos:
                 return bits_minimos
-            
+
             return bits_emergencia
 
     # =========================================================
-    # 3. DIFICULDADE NORMAL
+    # 3. ENTRE AJUSTES: MANTEM
     # =========================================================
 
     return ultimo_bits
@@ -2615,7 +2620,6 @@ class Miner:
                 coinbase = bc.create_coinbase(self.core.wallet.address, height)
                 txs = [coinbase] + bc.mempool[:MAX_BLOCK_TX - 1]
 
-            bloco_inicio = time.time()
             bits_efetivos = bits
             target = bits_para_target(bits_efetivos)
 
@@ -2626,34 +2630,8 @@ class Miner:
             counter = 0
             batch = self.batch_size
             sleep_time = self.sleep_per_batch
-            ultimo_check_stall = bloco_inicio
 
             while self.running:
-                # Recalcula block_time e bits a cada 5s
-                # Se passou de 150s, a emergencia dispara
-                agora_loop = time.time()
-                if (agora_loop - ultimo_check_stall) >= 5:
-                    ultimo_check_stall = agora_loop
-                    
-                    # FORCA emergencia se passou de 150s
-                    decorrido_bloco = agora_loop - bloco_inicio
-                    if decorrido_bloco > 150:
-                        target_novo = bits_para_target(bits_efetivos)
-                        target_novo = int(target_novo * 1.67)  # -40% na diff
-                        target_novo = max(1, min(target_novo, TARGET_MAX_BTC))
-                        bits_emergencia = target_para_bits(target_novo)
-                        
-                        if bits_emergencia != bits_efetivos:
-                            self.core.log(
-                                f"[EMERGENCIA] {int(decorrido_bloco)}s sem bloco "
-                                f"bits 0x{bits_efetivos:08X}->0x{bits_emergencia:08X}"
-                            )
-                            bits_efetivos = bits_emergencia
-                            target = bits_para_target(bits_efetivos)
-                            block_time = now()
-                            if block_time <= int(previous["time"]):
-                                block_time = int(previous["time"]) + 1
-
                 prefix = (
                     f"{height}:"
                     f"{block_time}:"
@@ -3966,6 +3944,7 @@ if __name__ == "__main__":
         except:
             print(e)
         traceback.print_exc()
+
 
 
 
