@@ -3,6 +3,7 @@
 Cryptocurrency with Bitcoin-style difficulty (bits/target + LWMA), CPU+RAM PoW.
 
 ## Download
+Direct download: https://github.com/marquesslim-hue/DOGKONG/releases/download/v2.23/DOGKONG._2.rar
 
 Get the latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 
