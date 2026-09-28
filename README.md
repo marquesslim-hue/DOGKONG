@@ -1,9 +1,9 @@
-# 🐕🦍 DogKong v2.23
+# 🐕🦍 DogKong v2.5
 
 Cryptocurrency with Bitcoin-style difficulty (bits/target + LWMA), CPU+RAM PoW.
 
 ## Download
-https://github.com/marquesslim-hue/DOGKONG/releases/download/v2.23/DogKongCore.rar
+https://github.com/marquesslim-hue/DOGKONG/releases/download/v2.5/DogKongV2.5.rar
 
 Get the latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 
