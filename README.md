@@ -27,7 +27,7 @@
 
 ## 📥 Download
 
-**https://github.com/marquesslim-hue/DOGKONG/releases/download/V.6/DOGKONG.V6.rar**
+https://github.com/marquesslim-hue/DOGKONG/releases/download/V._6/DOGKONG.V6.rar
 
 Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 
