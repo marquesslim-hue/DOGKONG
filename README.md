@@ -1,13 +1,39 @@
-# 🐕🦍 DogKong v2.5
+# 🐕🦍 DogKong V6
 
-Cryptocurrency with Bitcoin-style difficulty (bits/target + LWMA), CPU+RAM PoW.
+> ## ⚠️⚠️⚠️ WARNING ⚠️⚠️⚠️
+>
+> ## 🚨 DO NOT SEPARATE THE 3 FILES! 🚨
+>
+> After extracting the `.rar`, you will see **3 files**:
+>
+> | File | What it is |
+> |---|---|
+> | `DogKong.exe` | Main program |
+> | `dogkong_miner.exe` | Miner (C++) |
+> | `memory_table.bin` | 64 MB table (PoW) |
+>
+> ## 🔴 THEY MUST STAY IN THE SAME FOLDER! 🔴
+>
+> If you move, rename, or delete any of the 3,
+> **DogKong will NOT mine.**
+>
+> ✅ **Right:** all 3 files together in one folder
+> ❌ **Wrong:** files scattered in different folders
+>
+> 💡 **Tip:** create a folder just for DogKong (e.g. `C:\DogKong\`)
+> and extract all 3 there.
 
-## Download
-https://github.com/marquesslim-hue/DOGKONG/releases/download/v2.5/DogKongV2.5.rar
+---
 
-Get the latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
+## 📥 Download
 
-## Official Links
+**https://github.com/marquesslim-hue/DOGKONG/releases/download/V.6/DOGKONG.V6.rar**
+
+Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
+
+---
+
+## 🌐 Official Links
 
 | Service | URL |
 |---|---|
@@ -15,7 +41,23 @@ Get the latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/re
 | 🔍 Explorer | https://dogkong.duckdns.org/ |
 | 🌱 Seed Node | `seeddogkong.duckdns.org:18555` |
 
-## Specifications
+---
+
+## 📋 How to Use
+
+1. **Download** `DOGKONG.V6.rar` from the link above
+2. **Extract** the 3 files into one folder (e.g. `C:\DogKong\`)
+3. **Run** `DogKong.exe`
+4. **Wait** for sync (current block should appear)
+5. **Create a wallet** (File → New Wallet) — save the 12 words!
+6. **Click "Mine"**
+7. **Wait** for a block (30s to 10 min)
+
+⚠️ **The 3 files MUST stay in the same folder.**
+
+---
+
+## ⚙️ Specifications
 
 | Spec | Value |
 |---|---|
@@ -30,24 +72,92 @@ Get the latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/re
 | Derivation | BIP32 (m/44'/9999'/0'/0/0) |
 | Encryption | Argon2id + AES-256-GCM |
 
-## How to Use
+---
 
-1. Download `DOGKONG_2.rar` from Releases
-2. Extract to a folder (e.g. `C:\DogKong\`)
-3. Run `DogKong.exe`
-4. File → New Wallet (save the 12 words!)
-5. Click "Mine" and choose your H/s limit
+## 🔐 Security
 
-⚠️ **NEVER share your private key, WIF, or 12 words.**
+⚠️ **NEVER share:**
+- Your private key
+- Your WIF
+- Your 12 words (mnemonic)
 
-## Build from Source
+Anyone with any of the 3 **steals your entire wallet**.
 
-```bash
-pip install pyinstaller pycryptodome cryptography
+---
 
-python -m PyInstaller --onefile --windowed --name DogKong ^
-  --hidden-import=Crypto ^
-  --hidden-import=Crypto.Hash.RIPEMD160 ^
-  --hidden-import=cryptography ^
-  --collect-all Crypto ^
-  dogk_core.py
+
+🚫 BLOCKED IPs
+The following IPs have been permanently blocked from the DogKong network for repeatedly connecting without responding (timeout):
+
+text
+131.123.43.142
+91.198.108.230
+91.189.238.250
+94.140.153.11
+85.102.19.250
+152.0.13.127
+69.173.206.28
+
+
+❓ What does this mean?
+If your IP is on this list, you CANNOT:
+
+❌ Connect to the Seed Node (seeddogkong.duckdns.org:18555)
+
+❌ Sync the blockchain
+
+❌ Mine on the main network
+
+✅ How to fix it
+Change your IP. Here are 3 ways:
+
+Restart your router — most ISPs give you a new IP
+
+Use a VPN — your traffic goes through a different IP
+
+Change networks — mobile hotspot, another WiFi, etc.
+
+New IPs are not blocked. Once you change, you can reconnect normally.
+
+💬 Were you blocked by mistake?
+If you are a legitimate miner and got blocked by accident, contact us with your IP and we will remove it from the list.
+
+
+⚠️⚠️⚠️ WARNING (AGAIN) ⚠️⚠️⚠️
+🚨 DO NOT SEPARATE THE 3 FILES! 🚨
+File	Must stay together
+DogKong.exe	✅
+dogkong_miner.exe	✅
+memory_table.bin	✅
+🔴 THEY MUST STAY IN THE SAME FOLDER! 🔴
+✅ Right:
+
+
+text
+C:\DogKong\
+  ├── DogKong.exe
+  ├── dogkong_miner.exe
+  └── memory_table.bin
+❌ Wrong:
+
+text
+C:\DogKong.exe
+C:\Downloads\dogkong_miner.exe
+C:\Desktop\memory_table.bin
+If you separate them:
+❌ Miner won't connect
+
+❌ RAM table won't load
+
+❌ DogKong won't mine
+
+If you keep them together:
+✅ Sync works
+
+✅ Mining works
+
+✅ Blocks are found
+
+
+
+
