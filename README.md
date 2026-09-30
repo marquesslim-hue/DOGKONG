@@ -123,41 +123,5 @@ New IPs are not blocked. Once you change, you can reconnect normally.
 If you are a legitimate miner and got blocked by accident, contact us with your IP and we will remove it from the list.
 
 
-⚠️⚠️⚠️ WARNING (AGAIN) ⚠️⚠️⚠️
-🚨 DO NOT SEPARATE THE 3 FILES! 🚨
-File	Must stay together
-DogKong.exe	✅
-dogkong_miner.exe	✅
-memory_table.bin	✅
-🔴 THEY MUST STAY IN THE SAME FOLDER! 🔴
-✅ Right:
-
-
-text
-C:\DogKong\
-  ├── DogKong.exe
-  ├── dogkong_miner.exe
-  └── memory_table.bin
-❌ Wrong:
-
-text
-C:\DogKong.exe
-C:\Downloads\dogkong_miner.exe
-C:\Desktop\memory_table.bin
-If you separate them:
-❌ Miner won't connect
-
-❌ RAM table won't load
-
-❌ DogKong won't mine
-
-If you keep them together:
-✅ Sync works
-
-✅ Mining works
-
-✅ Blocks are found
-
-
 
 
