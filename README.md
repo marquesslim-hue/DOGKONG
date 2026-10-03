@@ -1,4 +1,4 @@
-# 🐕🦍 DogKong V6
+# 🐕🦍 DogKong V7
 
 > ## ⚠️⚠️⚠️ WARNING ⚠️⚠️⚠️
 >
@@ -26,7 +26,7 @@
 ---
 
 ## 📥 Download
-https://github.com/marquesslim-hue/DOGKONG/releases/download/V._6/DogKongNew.rar
+https://github.com/marquesslim-hue/DOGKONG/releases/download/v7/DogKongV7.exe.rar
 
 Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 
@@ -83,44 +83,6 @@ Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 Anyone with any of the 3 **steals your entire wallet**.
 
 ---
-
-
-🚫 BLOCKED IPs
-The following IPs have been permanently blocked from the DogKong network for repeatedly connecting without responding (timeout):
-
-text
-131.123.43.142
-91.198.108.230
-91.189.238.250
-94.140.153.11
-85.102.19.250
-152.0.13.127
-69.173.206.28
-
-
-❓ What does this mean?
-If your IP is on this list, you CANNOT:
-
-❌ Connect to the Seed Node (seeddogkong.duckdns.org:18555)
-
-❌ Sync the blockchain
-
-❌ Mine on the main network
-
-✅ How to fix it
-Change your IP. Here are 3 ways:
-
-Restart your router — most ISPs give you a new IP
-
-Use a VPN — your traffic goes through a different IP
-
-Change networks — mobile hotspot, another WiFi, etc.
-
-New IPs are not blocked. Once you change, you can reconnect normally.
-
-💬 Were you blocked by mistake?
-If you are a legitimate miner and got blocked by accident, contact us with your IP and we will remove it from the list.
-
 
 
 
