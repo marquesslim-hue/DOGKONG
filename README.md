@@ -1,4 +1,15 @@
-# 🐕🦍 DogKong V7
+HARDFORK AT BLOCK 20,000
+
+UPDATE YOUR MINER
+
+IF YOU DO NOT UPDATE BEFORE BLOCK 20,000, ANY COINS YOU MINE AFTER BLOCK 20,000 WILL NOT BE PART OF THE DOGKONG NETWORK.
+
+## 📥 Download
+https://github.com/marquesslim-hue/DOGKONG/releases/download/v8/DogKong_v8.exe.rar
+
+Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
+
+# 🐕🦍 DogKong V8
 
 > ## ⚠️⚠️⚠️ WARNING ⚠️⚠️⚠️
 >
@@ -26,7 +37,7 @@
 ---
 
 ## 📥 Download
-https://github.com/marquesslim-hue/DOGKONG/releases/download/v7/DogKongV7.exe.rar
+https://github.com/marquesslim-hue/DOGKONG/releases/download/v8/DogKong_v8.exe.rar
 
 Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 
