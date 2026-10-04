@@ -5,11 +5,11 @@ UPDATE YOUR MINER
 IF YOU DO NOT UPDATE BEFORE BLOCK 20,000, ANY COINS YOU MINE AFTER BLOCK 20,000 WILL NOT BE PART OF THE DOGKONG NETWORK.
 
 ## 📥 Download
-https://github.com/marquesslim-hue/DOGKONG/releases/download/v8/DogKong_v8.exe.rar
+https://github.com/marquesslim-hue/DOGKONG/releases/download/v8.1/dogkong_coreV8.1.exe.rar
 
 Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 
-# 🐕🦍 DogKong V8
+# 🐕🦍 DogKong V8.1
 
 > ## ⚠️⚠️⚠️ WARNING ⚠️⚠️⚠️
 >
@@ -37,7 +37,7 @@ Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 ---
 
 ## 📥 Download
-https://github.com/marquesslim-hue/DOGKONG/releases/download/v8/DogKong_v8.exe.rar
+https://github.com/marquesslim-hue/DOGKONG/releases/download/v8.1/dogkong_coreV8.1.exe.rar
 
 Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 
