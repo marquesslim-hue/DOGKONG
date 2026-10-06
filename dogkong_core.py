@@ -9,12 +9,13 @@ import os
 import sys
 import json
 import time
-import math
-import hmac
 import socket
 import shutil
 import hashlib
-import os, datetime
+import hmac
+import struct
+import secrets
+import datetime
 
 if getattr(sys, 'frozen', False):
     NOTIF_FILE = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "notificacoes.txt")
@@ -89,17 +90,12 @@ if os.name == "nt":
         liberar_firewall()
 
 APP = "DogKong v2"
-VERSION = "2.3"
+VERSION = "2.4"
 P2P_PORT = 18555
 CHAIN_ID = "DOGK-V2-MAINNET"
-UPDATE_PASSWORD = "*Jesus357860301988"   # DOGK_UPDATE_SENHA - muda esta senha!
 
-SEED_ONLY = os.environ.get("DOGK_SEED_ONLY") == "1"
-HUB_MODE = os.environ.get("DOGK_HUB") == "1"
 MAX_ACTIVE_CONNS = 50
 
-FORCE_SEED_IP = os.environ.get("DOGK_SEED_IP", "").strip()
-SEED_CONNS = int(os.environ.get("DOGK_SEED_CONNS", "2"))
 TOR_ENABLED = os.environ.get("DOGK_TOR", "0") == "1"
 
 if getattr(sys, 'frozen', False):
@@ -113,6 +109,8 @@ MEMPOOL_FILE = os.path.join(DATA, "mempool.json")
 PEERS_FILE = os.path.join(DATA, "peers.json")
 SEEDS_FILE = os.path.join(DATA, "seeds.json")
 LANG_FILE = os.path.join(DATA, "lang.txt")
+CHECKPOINT_FILE = os.path.join(DATA, "checkpoint.json")
+AUDIT_FILE = os.path.join(DATA, "audit.json")
 os.makedirs(DATA, exist_ok=True)
 
 def _caminho_recurso(nome):
@@ -144,32 +142,6 @@ def _caminho_recurso(nome):
     return candidatos[0] if candidatos else nome
 
 
-# ============================================================
-# DETECCAO AUTOMATICA DE PRINCIPAL (VPS / primeiro no)
-# Regra:
-#   1. Se existe principal.txt na pasta dogk_data_v2/  -> PRINCIPAL
-#   2. Senao, se peers.json nao existe ou esta vazio    -> PRINCIPAL
-#   3. Senao                                            -> PEER NORMAL
-# ============================================================
-PRINCIPAL_FILE = os.path.join(DATA, "principal.txt")
-PEERS_FILE_TMP = os.path.join(DATA, "peers.json")
-
-def _detectar_principal():
-    # 1. Env var DOGK_PRINCIPAL=1 forca principal
-    if os.environ.get("DOGK_PRINCIPAL", "0") == "1":
-        try:
-            with open(PRINCIPAL_FILE, "w", encoding="utf-8") as f:
-                f.write("1")
-        except Exception:
-            pass
-        return True
-    # 2. Se principal.txt existe, e principal
-    if os.path.exists(PRINCIPAL_FILE):
-        return True
-    return False
-
-SOU_PRINCIPAL = False
-PRINCIPAL_CONNS = int(os.environ.get("DOGK_PRINCIPAL_CONNS", "4"))
 
 INITIAL_SUPPLY_REF = 10_000_000_000
 YEARLY_EMISSION = 5_256_000_000
@@ -188,7 +160,7 @@ LWMA_START_HEIGHT = 11984        # LWMA real a partir deste bloco
 MAX_TIME_DELTA = BLOCK_TIME * 4   # clamp de timestamp
 
 # Anti-travamento em tempo real
-STALL_TIME_MULT = 5               # ativa aps 5  BLOCK_TIME = 300s sem bloco
+STALL_TIME_MULT = 3               # ativa apos 3 * BLOCK_TIME = 180s sem bloco
 
 FAST_TIME = BLOCK_TIME // 2
 SLOW_TIME = BLOCK_TIME * 2
@@ -206,12 +178,8 @@ MAX_MEMPOOL_TX = 20000
 MAX_MEMPOOL_BYTES = 20_000_000
 MAX_FUTURE_TIME = 7200
 CHECKPOINT_INTERVAL = 1000
+FORCE_CHECKPOINT_HEIGHT = 15539   # validacao comeca DESTE bloco pra frente
 CHECKPOINT_DEPTH = 100
-CHECKPOINT_HEIGHT = 12000
-HARDFORK_HEIGHT = 20000   # 13436 + 64 blocos de margem
-CHECKPOINT_HEIGHT_2 = 13436
-CHECKPOINT_HASH_2 = "00008c0bc0d7e33e461fd943f8f430e9362ed11842053770234bbd562479590b"
-CHECKPOINT_HASH = "00000087713b892b89c8a4ca7045223c2cbc0a53a9a3746055b8719eaeab8515"
 PEER_BAN_TIME = 3600
 MAX_PEERS_PER_IP = 10
 MIN_OUTBOUND_PEERS = 4
@@ -219,11 +187,17 @@ HANDSHAKE_TIMEOUT = 10
 MAX_PEER_MESSAGES_PER_MIN = 120
 
 USE_ARGON2 = False
+_HAS_AES = False
 try:
     import argon2.low_level as _argon2
     USE_ARGON2 = True
 except ImportError:
-    pass
+    print("[DOGK] AVISO: argon2 nao instalado - usando PBKDF2 (mais lento)", flush=True)
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _AESGCM
+    _HAS_AES = True
+except ImportError:
+    print("[DOGK] AVISO: cryptography nao instalado - usando XOR fallback", flush=True)
 
 MEMORY_MB = 64
 MEMORY_ITER = 128
@@ -238,10 +212,8 @@ RATE_LIMIT_PER_SEC = 20
 
 DEFAULT_SEEDS = [
     "dogkong-seed1.duckdns.org",
-    "dogkong-seed2.duckdns.org",
 ]
 HARDCODED_IPS = []  # Sem IP fixo (P2P puro)
-REMOTE_SEEDS_URL = ""
     
 
 
@@ -388,90 +360,90 @@ TRANSLATIONS = {
         "edit_seeds": "Editar Seeds", "about": "Acerca de DogKong",
     },
     "zh": {
-        "overview": "Ã¦Â¦â€šÃ¨Â§Ë†", "send": "Ã¥Ââ€˜Ã©â‚¬Â", "receive": "Ã¦Å½Â¥Ã¦â€Â¶",
-        "transactions": "Ã¤ÂºÂ¤Ã¦Ëœâ€œÃ¥Å½â€ Ã¥ÂÂ²", "history": "Ã¥Å’ÂºÃ¥Ââ€”Ã¥Å½â€ Ã¥ÂÂ²", "refresh": " Ã¥Ë†Â·Ã¦â€“Â°",
-        "network": "Ã§Â½â€˜Ã§Â»Å“",
-        "start_mining": " Ã¥Â¼â‚¬Ã¥Â§â€¹Ã¦Å’â€“Ã§Å¸Â¿", "stop_mining": " Ã¥ÂÅ“Ã¦Â­Â¢Ã¦Å’â€“Ã§Å¸Â¿",
-        "balance": "Ã¤Â½â„¢Ã©Â¢Â:", "block": "Ã¥Å’ÂºÃ¥Ââ€”", "difficulty": "Ã©Å¡Â¾Ã¥ÂºÂ¦",
-        "next_diff": "Ã¤Â¸â€¹Ã¤Â¸ÂªÃ©Å¡Â¾Ã¥ÂºÂ¦", "peers": "Ã¨Å â€šÃ§â€šÂ¹Ã¦â€¢Â°", "mempool": "Ã¤ÂºÂ¤Ã¦Ëœâ€œÃ¦Â±Â ",
-        "reward": "Ã¥Å’ÂºÃ¥Ââ€”Ã¥Â¥â€“Ã¥Å Â±", "public_ip": "Ã¥â€¦Â¬Ã§Â½â€˜ IP", "pow": "Ã¥Â·Â¥Ã¤Â½Å“Ã©â€¡ÂÃ¨Â¯ÂÃ¦ËœÅ½",
-        "hashrate_net": "Ã§Â½â€˜Ã§Â»Å“Ã§Â®â€”Ã¥Å â€º", "hashrate_local": "Ã¦Å“Â¬Ã¥Å“Â°Ã§Â®â€”Ã¥Å â€º",
-        "your_wallet": "Ã¦â€šÂ¨Ã§Å¡â€žÃ©â€™Â±Ã¥Å’â€¦", "address": "Ã¥Å“Â°Ã¥Ââ‚¬:",
-        "copy": "Ã¥Â¤ÂÃ¥Ë†Â¶", "wif_mnemonic": "WIF/Ã¥Å Â©Ã¨Â®Â°Ã¨Â¯Â", "copy_p2p": "Ã¥Â¤ÂÃ¥Ë†Â¶ P2P",
-        "password_on": " Ã¥Â¯â€ Ã§Â ÂÃ¥Â·Â²Ã¥Â¼â‚¬", "send_btcx": " Ã¥Ââ€˜Ã©â‚¬Â DOGK",
-        "dest_addr": "Ã¥â€¡ÂºÃ¥Å“Â°Ã¥Ââ‚¬:", "amount": "Ã¦â€¢Â°Ã©â€¡Â:", "fee": "Ã¦â€°â€¹Ã§Â»Â­Ã¨Â´Â¹:",
-        "send_btn": "Ã¥Ââ€˜Ã©â‚¬Â", "my_transactions": "Ã¦Ë†â€˜Ã§Å¡â€žÃ¤ÂºÂ¤Ã¦Ëœâ€œ",
-        "type": "Ã§Â±Â»Ã¥Å¾â€¹", "value": "Ã¤Â»Â·Ã¥â‚¬Â¼", "conf": "Ã§Â¡Â®Ã¨Â®Â¤",
-        "sent": "Ã¥Â·Â²Ã¥Ââ€˜Ã©â‚¬Â", "received": "Ã¥Â·Â²Ã¦Å½Â¥Ã¦â€Â¶", "block_num": "Ã¥Å’ÂºÃ¥Ââ€”:",
-        "show": "Ã¦ËœÂ¾Ã§Â¤Âº", "last": "Ã¦Å“â‚¬Ã¥ÂÅ½", "language": "Ã¨Â¯Â­Ã¨Â¨â‚¬",
-        "copied": "Ã¥Â·Â²Ã¥Â¤ÂÃ¥Ë†Â¶!", "invalid_addr": "Ã¥Å“Â°Ã¥Ââ‚¬Ã¦â€”Â Ã¦â€¢Ë†.",
-        "insufficient": "Ã¤Â½â„¢Ã©Â¢ÂÃ¤Â¸ÂÃ¨Â¶Â³.", "rejected": "Ã¤ÂºÂ¤Ã¦Ëœâ€œÃ¨Â¢Â«Ã¦â€¹â€™.",
-        "invalid_values": "Ã¦â€¢Â°Ã¥â‚¬Â¼Ã¦â€”Â Ã¦â€¢Ë†.", "added_mempool": "Ã¤ÂºÂ¤Ã¦Ëœâ€œÃ¥Â·Â²Ã¥Å Â Ã¥â€¦Â¥Ã¦Â±Â .",
-        "tx_sent": "Ã¤ÂºÂ¤Ã¦Ëœâ€œÃ¥Â·Â²Ã¥Ââ€˜Ã©â‚¬Â", "mining_started": "Ã¥Â¼â‚¬Ã¥Â§â€¹Ã¦Å’â€“Ã§Å¸Â¿",
-        "mining_stopped": "Ã¦Å’â€“Ã§Å¸Â¿Ã¥ÂÅ“Ã¦Â­Â¢", "miner_on": "Ã¦Å’â€“Ã§Å¸Â¿Ã¥Â¼â‚¬Ã¥ÂÂ¯",
-        "miner_off": "Ã¦Å’â€“Ã§Å¸Â¿Ã¥â€¦Â³Ã©â€”Â­", "wallet_locked": " Ã©â€™Â±Ã¥Å’â€¦Ã¥Â·Â²Ã©â€Â",
-        "unlock_hint": "Ã¨Â¾â€œÃ¥â€¦Â¥Ã¥Â¯â€ Ã§Â ÂÃ¨Â§Â£Ã©â€Â:", "unlock_btn": "Ã¨Â§Â£Ã©â€Â",
-        "wrong_pass": "Ã¥Â¯â€ Ã§Â ÂÃ©â€â„¢Ã¨Â¯Â¯.", "wait_sec": "Ã§Â­â€° {s} Ã§Â§â€™Ã¥ÂÅ½Ã¥â€ ÂÃ¨Â¯â€¢.",
-        "never_share": "Ã¦Â°Â¸Ã¨Â¿Å“Ã¤Â¸ÂÃ¨Â¦ÂÃ¥Ë†â€ Ã¤ÂºÂ« WIF Ã¦Ë†â€“Ã¥Ââ€¢Ã¨Â¯Â.",
-        "copy_address": " Ã¥Â¤ÂÃ¥Ë†Â¶Ã¥Å“Â°Ã¥Ââ‚¬", "copy_wif": " Ã¥Â¤ÂÃ¥Ë†Â¶ WIF",
-        "copy_mnemonic": " Ã¥Â¤ÂÃ¥Ë†Â¶ 12 Ã¤Â¸ÂªÃ¥Ââ€¢Ã¨Â¯Â", "chain_id": "Chain ID",
-        "meta_block": "Ã¥Å’ÂºÃ¥Ââ€”Ã¦â€”Â¶Ã©â€”Â´", "year_emission": "Ã¥Ââ€˜Ã¨Â¡Å’Ã©â€¡Â",
-        "reward_block": "Ã¥Å’ÂºÃ¥Ââ€”Ã¥Â¥â€“Ã¥Å Â±", "network_events": "Ã§Â½â€˜Ã§Â»Å“Ã¤Âºâ€¹Ã¤Â»Â¶",
-        "copy_addr_ok": "Ã¥Å“Â°Ã¥Ââ‚¬Ã¥Â·Â²Ã¥Â¤ÂÃ¥Ë†Â¶!", "copy_wif_ok": "WIF Ã¥Â·Â²Ã¥Â¤ÂÃ¥Ë†Â¶!",
-        "copy_mn_ok": "12 Ã¤Â¸ÂªÃ¥Ââ€¢Ã¨Â¯ÂÃ¥Â·Â²Ã¥Â¤ÂÃ¥Ë†Â¶!",
-        "new_wallet": "Ã¦â€“Â°Ã©â€™Â±Ã¥Å’â€¦", "import_wif": "Ã¥Â¯Â¼Ã¥â€¦Â¥ WIF",
-        "restore_mnemonic": "Ã¦ÂÂ¢Ã¥Â¤Â 12 Ã¤Â¸ÂªÃ¥Ââ€¢Ã¨Â¯Â",
-        "show_wallet": "Ã¦ËœÂ¾Ã§Â¤Âº Ã©â€™Â±Ã¥Å’â€¦ / WIF / Ã¥Å Â©Ã¨Â®Â°Ã¨Â¯Â",
-        "backup": "Ã¥Â¤â€¡Ã¤Â»Â½Ã©â€™Â±Ã¥Å’â€¦",
-        "set_password": " Ã¨Â®Â¾Ã§Â½Â®Ã¥Â¯â€ Ã§Â Â", "remove_password": " Ã§Â§Â»Ã©â„¢Â¤Ã¥Â¯â€ Ã§Â Â",
-        "change_password": " Ã¦â€ºÂ´Ã¦ÂÂ¢Ã¥Â¯â€ Ã§Â Â", "exit": "Ã©â‚¬â‚¬Ã¥â€¡Âº",
-        "file_menu": "Ã¦â€“â€¡Ã¤Â»Â¶", "settings_menu": "Ã¨Â®Â¾Ã§Â½Â®",
-        "help_menu": "Ã¥Â¸Â®Ã¥Å Â©", "lang_menu": " Ã¨Â¯Â­Ã¨Â¨â‚¬",
-        "connect_peer": "Ã¨Â¿Å¾Ã¦Å½Â¥Ã¨Å â€šÃ§â€šÂ¹", "sync_network": "Ã¥ÂÅ’Ã¦Â­Â¥Ã§Â½â€˜Ã§Â»Å“",
-        "edit_seeds": "Ã§Â¼â€“Ã¨Â¾â€˜Ã§Â§ÂÃ¥Â­Â", "about": "Ã¥â€¦Â³Ã¤ÂºÅ½ DogKong",
+        "overview": "æ¦‚è§ˆ", "send": "å‘é€", "receive": "æŽ¥æ”¶",
+        "transactions": "äº¤æ˜“åŽ†å²", "history": "åŒºå—åŽ†å²", "refresh": " åˆ·æ–°",
+        "network": "ç½‘ç»œ",
+        "start_mining": " å¼€å§‹æŒ–çŸ¿", "stop_mining": " åœæ­¢æŒ–çŸ¿",
+        "balance": "ä½™é¢:", "block": "åŒºå—", "difficulty": "éš¾åº¦",
+        "next_diff": "ä¸‹ä¸ªéš¾åº¦", "peers": "èŠ‚ç‚¹æ•°", "mempool": "äº¤æ˜“æ± ",
+        "reward": "åŒºå—å¥–åŠ±", "public_ip": "å…¬ç½‘ IP", "pow": "å·¥ä½œé‡è¯æ˜Ž",
+        "hashrate_net": "ç½‘ç»œç®—åŠ›", "hashrate_local": "æœ¬åœ°ç®—åŠ›",
+        "your_wallet": "æ‚¨çš„é’±åŒ…", "address": "åœ°å€:",
+        "copy": "å¤åˆ¶", "wif_mnemonic": "WIF/åŠ©è®°è¯", "copy_p2p": "å¤åˆ¶ P2P",
+        "password_on": " å¯†ç å·²å¼€", "send_btcx": " å‘é€ DOGK",
+        "dest_addr": "å‡ºåœ°å€:", "amount": "æ•°é‡:", "fee": "æ‰‹ç»­è´¹:",
+        "send_btn": "å‘é€", "my_transactions": "æˆ‘çš„äº¤æ˜“",
+        "type": "ç±»åž‹", "value": "ä»·å€¼", "conf": "ç¡®è®¤",
+        "sent": "å·²å‘é€", "received": "å·²æŽ¥æ”¶", "block_num": "åŒºå—:",
+        "show": "æ˜¾ç¤º", "last": "æœ€åŽ", "language": "è¯­è¨€",
+        "copied": "å·²å¤åˆ¶!", "invalid_addr": "åœ°å€æ— æ•ˆ.",
+        "insufficient": "ä½™é¢ä¸è¶³.", "rejected": "äº¤æ˜“è¢«æ‹’.",
+        "invalid_values": "æ•°å€¼æ— æ•ˆ.", "added_mempool": "äº¤æ˜“å·²åŠ å…¥æ± .",
+        "tx_sent": "äº¤æ˜“å·²å‘é€", "mining_started": "å¼€å§‹æŒ–çŸ¿",
+        "mining_stopped": "æŒ–çŸ¿åœæ­¢", "miner_on": "æŒ–çŸ¿å¼€å¯",
+        "miner_off": "æŒ–çŸ¿å…³é—­", "wallet_locked": " é’±åŒ…å·²é”",
+        "unlock_hint": "è¾“å…¥å¯†ç è§£é”:", "unlock_btn": "è§£é”",
+        "wrong_pass": "å¯†ç é”™è¯¯.", "wait_sec": "ç­‰ {s} ç§’åŽå†è¯•.",
+        "never_share": "æ°¸è¿œä¸è¦åˆ†äº« WIF æˆ–å•è¯.",
+        "copy_address": " å¤åˆ¶åœ°å€", "copy_wif": " å¤åˆ¶ WIF",
+        "copy_mnemonic": " å¤åˆ¶ 12 ä¸ªå•è¯", "chain_id": "Chain ID",
+        "meta_block": "åŒºå—æ—¶é—´", "year_emission": "å‘è¡Œé‡",
+        "reward_block": "åŒºå—å¥–åŠ±", "network_events": "ç½‘ç»œäº‹ä»¶",
+        "copy_addr_ok": "åœ°å€å·²å¤åˆ¶!", "copy_wif_ok": "WIF å·²å¤åˆ¶!",
+        "copy_mn_ok": "12 ä¸ªå•è¯å·²å¤åˆ¶!",
+        "new_wallet": "æ–°é’±åŒ…", "import_wif": "å¯¼å…¥ WIF",
+        "restore_mnemonic": "æ¢å¤ 12 ä¸ªå•è¯",
+        "show_wallet": "æ˜¾ç¤º é’±åŒ… / WIF / åŠ©è®°è¯",
+        "backup": "å¤‡ä»½é’±åŒ…",
+        "set_password": " è®¾ç½®å¯†ç ", "remove_password": " ç§»é™¤å¯†ç ",
+        "change_password": " æ›´æ¢å¯†ç ", "exit": "é€€å‡º",
+        "file_menu": "æ–‡ä»¶", "settings_menu": "è®¾ç½®",
+        "help_menu": "å¸®åŠ©", "lang_menu": " è¯­è¨€",
+        "connect_peer": "è¿žæŽ¥èŠ‚ç‚¹", "sync_network": "åŒæ­¥ç½‘ç»œ",
+        "edit_seeds": "ç¼–è¾‘ç§å­", "about": "å…³äºŽ DogKong",
     },
     "ru": {
-        "overview": "ÃÅ¾ÃÂ±ÃÂ·ÃÂ¾Ã‘â‚¬", "send": "ÃÅ¾Ã‘â€šÃÂ¿Ã‘â‚¬ÃÂ°ÃÂ²ÃÂ¸Ã‘â€šÃ‘Å’", "receive": "ÃÅ¸ÃÂ¾ÃÂ»Ã‘Æ’Ã‘â€¡ÃÂ¸Ã‘â€šÃ‘Å’",
-        "transactions": "ÃÂ¢Ã‘â‚¬ÃÂ°ÃÂ½ÃÂ·ÃÂ°ÃÂºÃ‘â€ ÃÂ¸ÃÂ¸", "history": "ÃËœÃ‘ÂÃ‘â€šÃÂ¾Ã‘â‚¬ÃÂ¸Ã‘Â", "refresh": " ÃÅ¾ÃÂ±ÃÂ½ÃÂ¾ÃÂ²ÃÂ¸Ã‘â€šÃ‘Å’",
-        "network": "ÃÂ¡ÃÂµÃ‘â€šÃ‘Å’",
-        "start_mining": " ÃÅ“ÃÂ°ÃÂ¹ÃÂ½ÃÂ¸Ã‘â€šÃ‘Å’", "stop_mining": " ÃÂ¡Ã‘â€šÃÂ¾ÃÂ¿",
-        "balance": "Ãâ€˜ÃÂ°ÃÂ»ÃÂ°ÃÂ½Ã‘Â:", "block": "Ãâ€˜ÃÂ»ÃÂ¾ÃÂº", "difficulty": "ÃÂ¡ÃÂ»ÃÂ¾ÃÂ¶ÃÂ½ÃÂ¾Ã‘ÂÃ‘â€šÃ‘Å’",
-        "next_diff": "ÃÂ¡ÃÂ»ÃÂµÃÂ´. Ã‘ÂÃÂ»ÃÂ¾ÃÂ¶ÃÂ½.", "peers": "ÃÅ¸ÃÂ¸Ã‘â‚¬Ã‘â€¹", "mempool": "ÃÅ“ÃÂµÃÂ¼ÃÂ¿Ã‘Æ’ÃÂ»",
-        "reward": "ÃÂÃÂ°ÃÂ³Ã‘â‚¬ÃÂ°ÃÂ´ÃÂ°", "public_ip": "ÃÅ¸Ã‘Æ’ÃÂ±ÃÂ»ÃÂ¸Ã‘â€¡ÃÂ½Ã‘â€¹ÃÂ¹ IP", "pow": "PoW",
-        "hashrate_net": "ÃÂ¥Ã‘ÂÃ‘Ë†Ã‘â‚¬ÃÂµÃÂ¹Ã‘â€š Ã‘ÂÃÂµÃ‘â€šÃÂ¸", "hashrate_local": "ÃÂ¥Ã‘ÂÃ‘Ë†Ã‘â‚¬ÃÂµÃÂ¹Ã‘â€š ÃÂ½ÃÂ¾ÃÂ´ÃÂ°",
-        "your_wallet": "Ãâ€™ÃÂ°Ã‘Ë† ÃÂºÃÂ¾Ã‘Ë†ÃÂµÃÂ»ÃÂµÃÂº", "address": "ÃÂÃÂ´Ã‘â‚¬ÃÂµÃ‘Â:",
-        "copy": "ÃÅ¡ÃÂ¾ÃÂ¿ÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°Ã‘â€šÃ‘Å’", "wif_mnemonic": "WIF/ÃÅ“ÃÂ½ÃÂµÃÂ¼ÃÂ¾ÃÂ½ÃÂ¸ÃÂºÃÂ°", "copy_p2p": "ÃÅ¡ÃÂ¾ÃÂ¿ÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°Ã‘â€šÃ‘Å’ P2P",
-        "password_on": " ÃÅ¸ÃÂ°Ã‘â‚¬ÃÂ¾ÃÂ»Ã‘Å’ ÃÂ°ÃÂºÃ‘â€šÃÂ¸ÃÂ²ÃÂµÃÂ½", "send_btcx": " ÃÅ¾Ã‘â€šÃÂ¿Ã‘â‚¬ÃÂ°ÃÂ²ÃÂ¸Ã‘â€šÃ‘Å’ DOGK",
-        "dest_addr": "ÃÂÃÂ´Ã‘â‚¬ÃÂµÃ‘Â ÃÂ½ÃÂ°ÃÂ·ÃÂ½ÃÂ°Ã‘â€¡ÃÂµÃÂ½ÃÂ¸Ã‘Â:", "amount": "ÃÂ¡Ã‘Æ’ÃÂ¼ÃÂ¼ÃÂ°:", "fee": "ÃÅ¡ÃÂ¾ÃÂ¼ÃÂ¸Ã‘ÂÃ‘ÂÃÂ¸Ã‘Â:",
-        "send_btn": "ÃÅ¾Ã‘â€šÃÂ¿Ã‘â‚¬ÃÂ°ÃÂ²ÃÂ¸Ã‘â€šÃ‘Å’", "my_transactions": "ÃÅ“ÃÂ¾ÃÂ¸ Ã‘â€šÃ‘â‚¬ÃÂ°ÃÂ½ÃÂ·ÃÂ°ÃÂºÃ‘â€ ÃÂ¸ÃÂ¸",
-        "type": "ÃÂ¢ÃÂ¸ÃÂ¿", "value": "Ãâ€”ÃÂ½ÃÂ°Ã‘â€¡ÃÂµÃÂ½ÃÂ¸ÃÂµ", "conf": "ÃÅ¸ÃÂ¾ÃÂ´Ã‘â€šÃÂ²ÃÂµÃ‘â‚¬ÃÂ¶ÃÂ´ÃÂµÃÂ½ÃÂ¸ÃÂµ",
-        "sent": "ÃÅ¾Ã‘â€šÃÂ¿Ã‘â‚¬ÃÂ°ÃÂ²ÃÂ»ÃÂµÃÂ½ÃÂ¾", "received": "ÃÅ¸ÃÂ¾ÃÂ»Ã‘Æ’Ã‘â€¡ÃÂµÃÂ½ÃÂ¾", "block_num": "Ãâ€˜ÃÂ»ÃÂ¾ÃÂº:",
-        "show": "ÃÅ¸ÃÂ¾ÃÂºÃÂ°ÃÂ·ÃÂ°Ã‘â€šÃ‘Å’", "last": "ÃÅ¸ÃÂ¾Ã‘ÂÃÂ»ÃÂµÃÂ´ÃÂ½ÃÂ¸ÃÂ¹", "language": "ÃÂ¯ÃÂ·Ã‘â€¹ÃÂº",
-        "copied": "ÃÂ¡ÃÂºÃÂ¾ÃÂ¿ÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°ÃÂ½ÃÂ¾!", "invalid_addr": "ÃÂÃÂµÃÂ²ÃÂµÃ‘â‚¬ÃÂ½Ã‘â€¹ÃÂ¹ ÃÂ°ÃÂ´Ã‘â‚¬ÃÂµÃ‘Â.",
-        "insufficient": "ÃÂÃÂµÃÂ´ÃÂ¾Ã‘ÂÃ‘â€šÃÂ°Ã‘â€šÃÂ¾Ã‘â€¡ÃÂ½ÃÂ¾ Ã‘ÂÃ‘â‚¬ÃÂµÃÂ´Ã‘ÂÃ‘â€šÃÂ².", "rejected": "ÃÂ¢Ã‘â‚¬ÃÂ°ÃÂ½ÃÂ·ÃÂ°ÃÂºÃ‘â€ ÃÂ¸Ã‘Â ÃÂ¾Ã‘â€šÃÂºÃÂ»ÃÂ¾ÃÂ½ÃÂµÃÂ½ÃÂ°.",
-        "invalid_values": "ÃÂÃÂµÃÂ²ÃÂµÃ‘â‚¬ÃÂ½Ã‘â€¹ÃÂµ ÃÂ·ÃÂ½ÃÂ°Ã‘â€¡ÃÂµÃÂ½ÃÂ¸Ã‘Â.", "added_mempool": "ÃÂ¢Ã‘â‚¬ÃÂ°ÃÂ½ÃÂ·ÃÂ°ÃÂºÃ‘â€ ÃÂ¸Ã‘Â ÃÂ´ÃÂ¾ÃÂ±ÃÂ°ÃÂ²ÃÂ»ÃÂµÃÂ½ÃÂ° ÃÂ² ÃÂ¼ÃÂµÃÂ¼ÃÂ¿Ã‘Æ’ÃÂ».",
-        "tx_sent": "ÃÂ¢Ã‘â‚¬ÃÂ°ÃÂ½ÃÂ·ÃÂ°ÃÂºÃ‘â€ ÃÂ¸Ã‘Â ÃÂ¾Ã‘â€šÃÂ¿Ã‘â‚¬ÃÂ°ÃÂ²ÃÂ»ÃÂµÃÂ½ÃÂ°", "mining_started": "ÃÅ“ÃÂ°ÃÂ¹ÃÂ½ÃÂ¸ÃÂ½ÃÂ³ ÃÂ½ÃÂ°Ã‘â€¡ÃÂ°Ã‘â€š",
-        "mining_stopped": "ÃÅ“ÃÂ°ÃÂ¹ÃÂ½ÃÂ¸ÃÂ½ÃÂ³ ÃÂ¾Ã‘ÂÃ‘â€šÃÂ°ÃÂ½ÃÂ¾ÃÂ²ÃÂ»ÃÂµÃÂ½", "miner_on": "ÃÅ“ÃÂ°ÃÂ¹ÃÂ½ÃÂµÃ‘â‚¬ ÃÂ²ÃÂºÃÂ»",
-        "miner_off": "ÃÅ“ÃÂ°ÃÂ¹ÃÂ½ÃÂµÃ‘â‚¬ ÃÂ²Ã‘â€¹ÃÂºÃÂ»", "wallet_locked": " ÃÅ¡ÃÂ¾Ã‘Ë†ÃÂµÃÂ»ÃÂµÃÂº ÃÂ·ÃÂ°ÃÂ±ÃÂ»ÃÂ¾ÃÂºÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°ÃÂ½",
-        "unlock_hint": "Ãâ€™ÃÂ²ÃÂµÃÂ´ÃÂ¸Ã‘â€šÃÂµ ÃÂ¿ÃÂ°Ã‘â‚¬ÃÂ¾ÃÂ»Ã‘Å’:", "unlock_btn": "ÃÂ ÃÂ°ÃÂ·ÃÂ±ÃÂ»ÃÂ¾ÃÂºÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°Ã‘â€šÃ‘Å’",
-        "wrong_pass": "ÃÂÃÂµÃÂ²ÃÂµÃ‘â‚¬ÃÂ½Ã‘â€¹ÃÂ¹ ÃÂ¿ÃÂ°Ã‘â‚¬ÃÂ¾ÃÂ»Ã‘Å’.", "wait_sec": "ÃÅ¸ÃÂ¾ÃÂ´ÃÂ¾ÃÂ¶ÃÂ´ÃÂ¸Ã‘â€šÃÂµ {s} Ã‘ÂÃÂµÃÂº.",
-        "never_share": "ÃÂÃÂ¸ÃÂºÃÂ¾ÃÂ³ÃÂ´ÃÂ° ÃÂ½ÃÂµ ÃÂ´ÃÂµÃÂ»ÃÂ¸Ã‘â€šÃÂµÃ‘ÂÃ‘Å’ WIF ÃÂ¸ÃÂ»ÃÂ¸ Ã‘ÂÃÂ»ÃÂ¾ÃÂ²ÃÂ°ÃÂ¼ÃÂ¸.",
-        "copy_address": " ÃÅ¡ÃÂ¾ÃÂ¿ÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°Ã‘â€šÃ‘Å’ ÃÂ°ÃÂ´Ã‘â‚¬ÃÂµÃ‘Â", "copy_wif": " ÃÅ¡ÃÂ¾ÃÂ¿ÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°Ã‘â€šÃ‘Å’ WIF",
-        "copy_mnemonic": " ÃÅ¡ÃÂ¾ÃÂ¿ÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°Ã‘â€šÃ‘Å’ 12 Ã‘ÂÃÂ»ÃÂ¾ÃÂ²", "chain_id": "ID Ã‘â€ ÃÂµÃÂ¿ÃÂ¸",
-        "meta_block": "Ãâ€™Ã‘â‚¬ÃÂµÃÂ¼Ã‘Â ÃÂ±ÃÂ»ÃÂ¾ÃÂºÃÂ°", "year_emission": "Ãâ€œÃÂ¾ÃÂ´ÃÂ¾ÃÂ²ÃÂ°Ã‘Â Ã‘ÂÃÂ¼ÃÂ¸Ã‘ÂÃ‘ÂÃÂ¸Ã‘Â",
-        "reward_block": "ÃÂÃÂ°ÃÂ³Ã‘â‚¬ÃÂ°ÃÂ´ÃÂ°/ÃÂ±ÃÂ»ÃÂ¾ÃÂº", "network_events": "ÃÂ¡ÃÂ¾ÃÂ±Ã‘â€¹Ã‘â€šÃÂ¸Ã‘Â Ã‘ÂÃÂµÃ‘â€šÃÂ¸",
-        "copy_addr_ok": "ÃÂÃÂ´Ã‘â‚¬ÃÂµÃ‘Â Ã‘ÂÃÂºÃÂ¾ÃÂ¿ÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°ÃÂ½!", "copy_wif_ok": "WIF Ã‘ÂÃÂºÃÂ¾ÃÂ¿ÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°ÃÂ½!",
-        "copy_mn_ok": "12 Ã‘ÂÃÂ»ÃÂ¾ÃÂ² Ã‘ÂÃÂºÃÂ¾ÃÂ¿ÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°ÃÂ½ÃÂ¾!",
-        "new_wallet": "ÃÂÃÂ¾ÃÂ²Ã‘â€¹ÃÂ¹ ÃÂºÃÂ¾Ã‘Ë†ÃÂµÃÂ»ÃÂµÃÂº", "import_wif": "ÃËœÃÂ¼ÃÂ¿ÃÂ¾Ã‘â‚¬Ã‘â€š WIF",
-        "restore_mnemonic": "Ãâ€™ÃÂ¾Ã‘ÂÃ‘ÂÃ‘â€šÃÂ°ÃÂ½ÃÂ¾ÃÂ²ÃÂ¸Ã‘â€šÃ‘Å’ 12 Ã‘ÂÃÂ»ÃÂ¾ÃÂ²",
-        "show_wallet": "ÃÅ¸ÃÂ¾ÃÂºÃÂ°ÃÂ·ÃÂ°Ã‘â€šÃ‘Å’ ÃÂºÃÂ¾Ã‘Ë†ÃÂµÃÂ»ÃÂµÃÂº / WIF / ÃÅ“ÃÂ½ÃÂµÃÂ¼ÃÂ¾ÃÂ½ÃÂ¸ÃÂºÃ‘Æ’",
-        "backup": "Ãâ€˜Ã‘ÂÃÂºÃÂ°ÃÂ¿ ÃÂºÃÂ¾Ã‘Ë†ÃÂµÃÂ»Ã‘Å’ÃÂºÃÂ°",
-        "set_password": " ÃÂ£Ã‘ÂÃ‘â€šÃÂ°ÃÂ½ÃÂ¾ÃÂ²ÃÂ¸Ã‘â€šÃ‘Å’ ÃÂ¿ÃÂ°Ã‘â‚¬ÃÂ¾ÃÂ»Ã‘Å’", "remove_password": " ÃÂ£ÃÂ´ÃÂ°ÃÂ»ÃÂ¸Ã‘â€šÃ‘Å’ ÃÂ¿ÃÂ°Ã‘â‚¬ÃÂ¾ÃÂ»Ã‘Å’",
-        "change_password": " ÃÂ¡ÃÂ¼ÃÂµÃÂ½ÃÂ¸Ã‘â€šÃ‘Å’ ÃÂ¿ÃÂ°Ã‘â‚¬ÃÂ¾ÃÂ»Ã‘Å’", "exit": "Ãâ€™Ã‘â€¹Ã‘â€¦ÃÂ¾ÃÂ´",
-        "file_menu": "ÃÂ¤ÃÂ°ÃÂ¹ÃÂ»", "settings_menu": "ÃÂÃÂ°Ã‘ÂÃ‘â€šÃ‘â‚¬ÃÂ¾ÃÂ¹ÃÂºÃÂ¸",
-        "help_menu": "ÃÅ¸ÃÂ¾ÃÂ¼ÃÂ¾Ã‘â€°Ã‘Å’", "lang_menu": " ÃÂ¯ÃÂ·Ã‘â€¹ÃÂº",
-        "connect_peer": "ÃÅ¸ÃÂ¾ÃÂ´ÃÂºÃÂ»Ã‘Å½Ã‘â€¡ÃÂ¸Ã‘â€šÃ‘Å’ ÃÂ¿ÃÂ¸Ã‘â‚¬", "sync_network": "ÃÂ¡ÃÂ¸ÃÂ½Ã‘â€¦Ã‘â‚¬ÃÂ¾ÃÂ½ÃÂ¸ÃÂ·ÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°Ã‘â€šÃ‘Å’ Ã‘ÂÃÂµÃ‘â€šÃ‘Å’",
-        "edit_seeds": "ÃÂ ÃÂµÃÂ´ÃÂ°ÃÂºÃ‘â€šÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°Ã‘â€šÃ‘Å’ Ã‘ÂÃÂµÃÂ¼ÃÂµÃÂ½ÃÂ°", "about": "ÃÅ¾ DogKong",
+        "overview": "ÐžÐ±Ð·Ð¾Ñ€", "send": "ÐžÑ‚Ð¿Ñ€Ð°Ð²Ð¸Ñ‚ÑŒ", "receive": "ÐŸÐ¾Ð»ÑƒÑ‡Ð¸Ñ‚ÑŒ",
+        "transactions": "Ð¢Ñ€Ð°Ð½Ð·Ð°ÐºÑ†Ð¸Ð¸", "history": "Ð˜ÑÑ‚Ð¾Ñ€Ð¸Ñ", "refresh": " ÐžÐ±Ð½Ð¾Ð²Ð¸Ñ‚ÑŒ",
+        "network": "Ð¡ÐµÑ‚ÑŒ",
+        "start_mining": " ÐœÐ°Ð¹Ð½Ð¸Ñ‚ÑŒ", "stop_mining": " Ð¡Ñ‚Ð¾Ð¿",
+        "balance": "Ð‘Ð°Ð»Ð°Ð½Ñ:", "block": "Ð‘Ð»Ð¾Ðº", "difficulty": "Ð¡Ð»Ð¾Ð¶Ð½Ð¾ÑÑ‚ÑŒ",
+        "next_diff": "Ð¡Ð»ÐµÐ´. ÑÐ»Ð¾Ð¶Ð½.", "peers": "ÐŸÐ¸Ñ€Ñ‹", "mempool": "ÐœÐµÐ¼Ð¿ÑƒÐ»",
+        "reward": "ÐÐ°Ð³Ñ€Ð°Ð´Ð°", "public_ip": "ÐŸÑƒÐ±Ð»Ð¸Ñ‡Ð½Ñ‹Ð¹ IP", "pow": "PoW",
+        "hashrate_net": "Ð¥ÑÑˆÑ€ÐµÐ¹Ñ‚ ÑÐµÑ‚Ð¸", "hashrate_local": "Ð¥ÑÑˆÑ€ÐµÐ¹Ñ‚ Ð½Ð¾Ð´Ð°",
+        "your_wallet": "Ð’Ð°Ñˆ ÐºÐ¾ÑˆÐµÐ»ÐµÐº", "address": "ÐÐ´Ñ€ÐµÑ:",
+        "copy": "ÐšÐ¾Ð¿Ð¸Ñ€Ð¾Ð²Ð°Ñ‚ÑŒ", "wif_mnemonic": "WIF/ÐœÐ½ÐµÐ¼Ð¾Ð½Ð¸ÐºÐ°", "copy_p2p": "ÐšÐ¾Ð¿Ð¸Ñ€Ð¾Ð²Ð°Ñ‚ÑŒ P2P",
+        "password_on": " ÐŸÐ°Ñ€Ð¾Ð»ÑŒ Ð°ÐºÑ‚Ð¸Ð²ÐµÐ½", "send_btcx": " ÐžÑ‚Ð¿Ñ€Ð°Ð²Ð¸Ñ‚ÑŒ DOGK",
+        "dest_addr": "ÐÐ´Ñ€ÐµÑ Ð½Ð°Ð·Ð½Ð°Ñ‡ÐµÐ½Ð¸Ñ:", "amount": "Ð¡ÑƒÐ¼Ð¼Ð°:", "fee": "ÐšÐ¾Ð¼Ð¸ÑÑÐ¸Ñ:",
+        "send_btn": "ÐžÑ‚Ð¿Ñ€Ð°Ð²Ð¸Ñ‚ÑŒ", "my_transactions": "ÐœÐ¾Ð¸ Ñ‚Ñ€Ð°Ð½Ð·Ð°ÐºÑ†Ð¸Ð¸",
+        "type": "Ð¢Ð¸Ð¿", "value": "Ð—Ð½Ð°Ñ‡ÐµÐ½Ð¸Ðµ", "conf": "ÐŸÐ¾Ð´Ñ‚Ð²ÐµÑ€Ð¶Ð´ÐµÐ½Ð¸Ðµ",
+        "sent": "ÐžÑ‚Ð¿Ñ€Ð°Ð²Ð»ÐµÐ½Ð¾", "received": "ÐŸÐ¾Ð»ÑƒÑ‡ÐµÐ½Ð¾", "block_num": "Ð‘Ð»Ð¾Ðº:",
+        "show": "ÐŸÐ¾ÐºÐ°Ð·Ð°Ñ‚ÑŒ", "last": "ÐŸÐ¾ÑÐ»ÐµÐ´Ð½Ð¸Ð¹", "language": "Ð¯Ð·Ñ‹Ðº",
+        "copied": "Ð¡ÐºÐ¾Ð¿Ð¸Ñ€Ð¾Ð²Ð°Ð½Ð¾!", "invalid_addr": "ÐÐµÐ²ÐµÑ€Ð½Ñ‹Ð¹ Ð°Ð´Ñ€ÐµÑ.",
+        "insufficient": "ÐÐµÐ´Ð¾ÑÑ‚Ð°Ñ‚Ð¾Ñ‡Ð½Ð¾ ÑÑ€ÐµÐ´ÑÑ‚Ð².", "rejected": "Ð¢Ñ€Ð°Ð½Ð·Ð°ÐºÑ†Ð¸Ñ Ð¾Ñ‚ÐºÐ»Ð¾Ð½ÐµÐ½Ð°.",
+        "invalid_values": "ÐÐµÐ²ÐµÑ€Ð½Ñ‹Ðµ Ð·Ð½Ð°Ñ‡ÐµÐ½Ð¸Ñ.", "added_mempool": "Ð¢Ñ€Ð°Ð½Ð·Ð°ÐºÑ†Ð¸Ñ Ð´Ð¾Ð±Ð°Ð²Ð»ÐµÐ½Ð° Ð² Ð¼ÐµÐ¼Ð¿ÑƒÐ».",
+        "tx_sent": "Ð¢Ñ€Ð°Ð½Ð·Ð°ÐºÑ†Ð¸Ñ Ð¾Ñ‚Ð¿Ñ€Ð°Ð²Ð»ÐµÐ½Ð°", "mining_started": "ÐœÐ°Ð¹Ð½Ð¸Ð½Ð³ Ð½Ð°Ñ‡Ð°Ñ‚",
+        "mining_stopped": "ÐœÐ°Ð¹Ð½Ð¸Ð½Ð³ Ð¾ÑÑ‚Ð°Ð½Ð¾Ð²Ð»ÐµÐ½", "miner_on": "ÐœÐ°Ð¹Ð½ÐµÑ€ Ð²ÐºÐ»",
+        "miner_off": "ÐœÐ°Ð¹Ð½ÐµÑ€ Ð²Ñ‹ÐºÐ»", "wallet_locked": " ÐšÐ¾ÑˆÐµÐ»ÐµÐº Ð·Ð°Ð±Ð»Ð¾ÐºÐ¸Ñ€Ð¾Ð²Ð°Ð½",
+        "unlock_hint": "Ð’Ð²ÐµÐ´Ð¸Ñ‚Ðµ Ð¿Ð°Ñ€Ð¾Ð»ÑŒ:", "unlock_btn": "Ð Ð°Ð·Ð±Ð»Ð¾ÐºÐ¸Ñ€Ð¾Ð²Ð°Ñ‚ÑŒ",
+        "wrong_pass": "ÐÐµÐ²ÐµÑ€Ð½Ñ‹Ð¹ Ð¿Ð°Ñ€Ð¾Ð»ÑŒ.", "wait_sec": "ÐŸÐ¾Ð´Ð¾Ð¶Ð´Ð¸Ñ‚Ðµ {s} ÑÐµÐº.",
+        "never_share": "ÐÐ¸ÐºÐ¾Ð³Ð´Ð° Ð½Ðµ Ð´ÐµÐ»Ð¸Ñ‚ÐµÑÑŒ WIF Ð¸Ð»Ð¸ ÑÐ»Ð¾Ð²Ð°Ð¼Ð¸.",
+        "copy_address": " ÐšÐ¾Ð¿Ð¸Ñ€Ð¾Ð²Ð°Ñ‚ÑŒ Ð°Ð´Ñ€ÐµÑ", "copy_wif": " ÐšÐ¾Ð¿Ð¸Ñ€Ð¾Ð²Ð°Ñ‚ÑŒ WIF",
+        "copy_mnemonic": " ÐšÐ¾Ð¿Ð¸Ñ€Ð¾Ð²Ð°Ñ‚ÑŒ 12 ÑÐ»Ð¾Ð²", "chain_id": "ID Ñ†ÐµÐ¿Ð¸",
+        "meta_block": "Ð’Ñ€ÐµÐ¼Ñ Ð±Ð»Ð¾ÐºÐ°", "year_emission": "Ð“Ð¾Ð´Ð¾Ð²Ð°Ñ ÑÐ¼Ð¸ÑÑÐ¸Ñ",
+        "reward_block": "ÐÐ°Ð³Ñ€Ð°Ð´Ð°/Ð±Ð»Ð¾Ðº", "network_events": "Ð¡Ð¾Ð±Ñ‹Ñ‚Ð¸Ñ ÑÐµÑ‚Ð¸",
+        "copy_addr_ok": "ÐÐ´Ñ€ÐµÑ ÑÐºÐ¾Ð¿Ð¸Ñ€Ð¾Ð²Ð°Ð½!", "copy_wif_ok": "WIF ÑÐºÐ¾Ð¿Ð¸Ñ€Ð¾Ð²Ð°Ð½!",
+        "copy_mn_ok": "12 ÑÐ»Ð¾Ð² ÑÐºÐ¾Ð¿Ð¸Ñ€Ð¾Ð²Ð°Ð½Ð¾!",
+        "new_wallet": "ÐÐ¾Ð²Ñ‹Ð¹ ÐºÐ¾ÑˆÐµÐ»ÐµÐº", "import_wif": "Ð˜Ð¼Ð¿Ð¾Ñ€Ñ‚ WIF",
+        "restore_mnemonic": "Ð’Ð¾ÑÑÑ‚Ð°Ð½Ð¾Ð²Ð¸Ñ‚ÑŒ 12 ÑÐ»Ð¾Ð²",
+        "show_wallet": "ÐŸÐ¾ÐºÐ°Ð·Ð°Ñ‚ÑŒ ÐºÐ¾ÑˆÐµÐ»ÐµÐº / WIF / ÐœÐ½ÐµÐ¼Ð¾Ð½Ð¸ÐºÑƒ",
+        "backup": "Ð‘ÑÐºÐ°Ð¿ ÐºÐ¾ÑˆÐµÐ»ÑŒÐºÐ°",
+        "set_password": " Ð£ÑÑ‚Ð°Ð½Ð¾Ð²Ð¸Ñ‚ÑŒ Ð¿Ð°Ñ€Ð¾Ð»ÑŒ", "remove_password": " Ð£Ð´Ð°Ð»Ð¸Ñ‚ÑŒ Ð¿Ð°Ñ€Ð¾Ð»ÑŒ",
+        "change_password": " Ð¡Ð¼ÐµÐ½Ð¸Ñ‚ÑŒ Ð¿Ð°Ñ€Ð¾Ð»ÑŒ", "exit": "Ð’Ñ‹Ñ…Ð¾Ð´",
+        "file_menu": "Ð¤Ð°Ð¹Ð»", "settings_menu": "ÐÐ°ÑÑ‚Ñ€Ð¾Ð¹ÐºÐ¸",
+        "help_menu": "ÐŸÐ¾Ð¼Ð¾Ñ‰ÑŒ", "lang_menu": " Ð¯Ð·Ñ‹Ðº",
+        "connect_peer": "ÐŸÐ¾Ð´ÐºÐ»ÑŽÑ‡Ð¸Ñ‚ÑŒ Ð¿Ð¸Ñ€", "sync_network": "Ð¡Ð¸Ð½Ñ…Ñ€Ð¾Ð½Ð¸Ð·Ð¸Ñ€Ð¾Ð²Ð°Ñ‚ÑŒ ÑÐµÑ‚ÑŒ",
+        "edit_seeds": "Ð ÐµÐ´Ð°ÐºÑ‚Ð¸Ñ€Ð¾Ð²Ð°Ñ‚ÑŒ ÑÐµÐ¼ÐµÐ½Ð°", "about": "Ðž DogKong",
     },
 }
 
@@ -1705,7 +1677,7 @@ MEMORY_TABLE_FILE = os.path.join(DATA, "memory_table.bin")
 def _build_memory_table():
     """
     Carrega o memory_table.bin empacotado dentro do .exe (ou do lado do .py).
-    NUNCA gera em runtime Ã¢â‚¬â€ instantÃƒÂ¢neo sempre.
+    NUNCA gera em runtime â€” instantÃ¢neo sempre.
     """
     if getattr(sys, 'frozen', False):
         # .exe: procura do lado do executavel PRIMEIRO
@@ -1855,6 +1827,8 @@ class Blockchain:
             self.chain = []
             self.mempool = []
             self._aguardando_sync = True
+            self.checkpoint = {"height": -1, "hash": "0" * 64, "time": now()}
+            self._ultimo_bloco_valido = -1
             print("[DOGK v2] Sem blockchain local. Aguardando sincronizacao com a rede...", flush=True)
             return
         self._aguardando_sync = False
@@ -1866,6 +1840,20 @@ class Blockchain:
         # A validacao so acontece quando recebe chain de outro peer
         self.chain = chain
         self.mempool = load_json(MEMPOOL_FILE, default=[])
+        self.checkpoint = self._carregar_ou_criar_checkpoint()
+        print(f"[DOGK v2] Checkpoint: altura {self.checkpoint['height']} hash {self.checkpoint['hash'][:16]}...", flush=True)
+        try:
+            self._construir_indice_saldos()
+            print(f"[DOGK v2] Indice de saldos: {len(self._saldos)} enderecos", flush=True)
+        except Exception as _e:
+            print(f"[DOGK v2] AVISO indice: {_e}", flush=True)
+        # ============================================
+        # AUDITORIA COMPLETA (1x no startup)
+        # ============================================
+        try:
+            self._auditar_chain()
+        except Exception as _e:
+            print(f"[DOGK v2] AVISO auditoria: {_e}", flush=True)
 
     # --------------------------------------------------------
     # GENESIS (criado automaticamente na primeira execuo)
@@ -1885,7 +1873,6 @@ class Blockchain:
             "bits": INITIAL_DIFFICULTY,
             "nonce": 0,
             "miner": "DOGK-V2-GENESIS",
-            "chain_id": CHAIN_ID,
             "tx": [],
             "message": "DogKong v2 Genesis Block",
             "hash": ""
@@ -1918,6 +1905,244 @@ class Blockchain:
     def genesis(self):
         return self.criar_bloco_genesis()
 
+    def _auditar_chain(self):
+        """Audita a chain INTEIRA do bloco 0 ate o ultimo.
+        Marca o ultimo bloco VALIDO. Se achar saldo negativo, para."""
+        n = len(self.chain)
+        if n == 0:
+            return
+
+        # Verifica cache: se ja auditou essa chain, nao repete
+        if os.path.exists(AUDIT_FILE):
+            try:
+                with open(AUDIT_FILE, "r", encoding="utf-8") as f:
+                    audit = json.load(f)
+                if audit.get("total_blocos") == n:
+                    self._ultimo_bloco_valido = int(audit.get("ultimo_valido", n - 1))
+                    print(f"[DOGK v2] Auditoria em cache: ultimo valido #{self._ultimo_bloco_valido}", flush=True)
+                    return
+            except Exception:
+                pass
+
+        inicio_audit = 0
+        if FORCE_CHECKPOINT_HEIGHT > 0 and n > FORCE_CHECKPOINT_HEIGHT:
+            inicio_audit = FORCE_CHECKPOINT_HEIGHT
+            print(f"[AUDIT] Pulando blocos <= {FORCE_CHECKPOINT_HEIGHT} (confiaveis)", flush=True)
+
+        print(f"[DOGK v2] Auditando de #{inicio_audit} ate #{n-1} ({n - inicio_audit} blocos)...", flush=True)
+        inicio = time.time()
+        saldos = {}
+        ultimo_valido = inicio_audit - 1
+        erro_bloco = -1
+        erro_info = ""
+
+        for i in range(inicio_audit, n):
+            blk = self.chain[i]
+            for tx in blk.get("tx", []):
+                s = tx.get("from"); r = tx.get("to")
+                a = float(tx.get("amount", 0)); f = float(tx.get("fee", 0))
+                if s == "COINBASE":
+                    saldos[r] = saldos.get(r, 0.0) + a
+                    continue
+                custo = a + f
+                if saldos.get(s, 0.0) < custo - 1e-9:
+                    erro_bloco = i
+                    erro_info = f"{s} tem {saldos.get(s, 0.0):.8f} precisa {custo:.8f}"
+                    break
+                saldos[s] = saldos.get(s, 0.0) - custo
+                saldos[r] = saldos.get(r, 0.0) + a
+            if erro_bloco >= 0:
+                break
+            ultimo_valido = i
+
+        decorrido = time.time() - inicio
+        self._ultimo_bloco_valido = ultimo_valido
+
+        if erro_bloco >= 0:
+            print(f"[DOGK v2] AUDITORIA: saldo negativo no bloco #{erro_bloco}", flush=True)
+            print(f"[DOGK v2] AUDITORIA: {erro_info}", flush=True)
+            print(f"[DOGK v2] AUDITORIA: ultimo bloco valido = #{ultimo_valido}", flush=True)
+        else:
+            print(f"[DOGK v2] AUDITORIA OK: {n} blocos validos em {decorrido:.1f}s", flush=True)
+
+        # Salva cache
+        try:
+            audit = {
+                "total_blocos": n,
+                "ultimo_valido": ultimo_valido,
+                "erro_bloco": erro_bloco,
+                "erro_info": erro_info,
+                "saldos": {k: v for k, v in saldos.items() if abs(v) > 1e-9},
+                "criado_em": now()
+            }
+            with open(AUDIT_FILE, "w", encoding="utf-8") as f:
+                json.dump(audit, f, indent=2)
+        except Exception as e:
+            print(f"[DOGK v2] AVISO: falha ao salvar audit.json: {e}", flush=True)
+
+    def _limpar_mempool_inicial(self):
+        """Remove TXs do mempool que ja estao na chain ou sao duplicadas."""
+        if not self.mempool:
+            return
+        antes = len(self.mempool)
+        ids_chain = set()
+        for b in self.chain:
+            for tx in b.get("tx", []):
+                tid = tx.get("id")
+                if tid:
+                    ids_chain.add(tid)
+        self.mempool = [tx for tx in self.mempool if tx.get("id") not in ids_chain]
+        vistos = set()
+        limpo = []
+        for tx in self.mempool:
+            tid = tx.get("id")
+            if tid in vistos:
+                continue
+            vistos.add(tid)
+            limpo.append(tx)
+        self.mempool = limpo
+        depois = len(self.mempool)
+        if depois < antes:
+            print(f"[MEMPOOL] Limpeza inicial: {antes} -> {depois} TXs", flush=True)
+            try:
+                save_json(MEMPOOL_FILE, self.mempool)
+            except Exception:
+                pass
+
+    def _carregar_ou_criar_checkpoint(self):
+        if os.path.exists(CHECKPOINT_FILE):
+            try:
+                cp = json.load(open(CHECKPOINT_FILE, encoding="utf-8"))
+                if self.chain and cp.get("height", -1) <= len(self.chain) - 1:
+                    h = int(cp["height"])
+                    if h < len(self.chain) and self.chain[h].get("hash") == cp.get("hash"):
+                        return cp
+            except Exception:
+                pass
+        if not self.chain:
+            cp = {"height": -1, "hash": "0" * 64, "time": now()}
+        else:
+            u = self.chain[-1]
+            cp = {"height": int(u["height"]), "hash": u["hash"], "time": int(u["time"]), "criado_em": now()}
+        try:
+            save_json(CHECKPOINT_FILE, cp)
+        except Exception:
+            pass
+        return cp
+
+    def _construir_indice_saldos(self, ate_bloco=None, chain=None):
+        """Constroi cache de saldos INCREMENTAL com VALIDACAO de saldo negativo.
+        Thread-safe. Se encontrar saldo negativo em qualquer bloco, retorna None
+        e guarda o ultimo bloco valido em self._ultimo_bloco_valido.
+        Se chain for passada, usa ela (nao mexe em self._saldos/_ultimo_indice)."""
+        # Se passaram uma chain externa, constroi saldos LOCAIS (sem cache)
+        if chain is not None:
+            if ate_bloco is None:
+                ate_bloco = len(chain)
+            saldos = {}
+            inicio = FORCE_CHECKPOINT_HEIGHT
+            for i in range(inicio, ate_bloco):
+                for tx in chain[i].get("tx", []):
+                    s = tx.get("from"); r = tx.get("to")
+                    a = float(tx.get("amount", 0)); f = float(tx.get("fee", 0))
+                    if s == "COINBASE":
+                        saldos[r] = saldos.get(r, 0.0) + a
+                        continue
+                    custo = a + f
+                    if saldos.get(s, 0.0) < custo - 1e-9:
+                        return None
+                    saldos[s] = saldos.get(s, 0.0) - custo
+                    saldos[r] = saldos.get(r, 0.0) + a
+            return saldos
+
+        # Senao, usa o cache normal
+        with self.lock:
+            if ate_bloco is None:
+                ate_bloco = len(self.chain)
+            if hasattr(self, "_saldos") and getattr(self, "_ultimo_indice", -1) == ate_bloco:
+                return self._saldos
+
+            # Se temos cache anterior e pediram mais blocos, aplica so o diff
+            tem_cache = (hasattr(self, "_saldos") and
+                         getattr(self, "_ultimo_indice", -1) >= 0 and
+                         getattr(self, "_ultimo_bloco_valido", -1) >= 0)
+            if tem_cache:
+                saldos = dict(self._saldos)
+                inicio = self._ultimo_indice
+                if inicio > ate_bloco:
+                    saldos = {}
+                    inicio = 0
+            else:
+                saldos = {}
+                inicio = FORCE_CHECKPOINT_HEIGHT   # comeca do checkpoint
+
+
+            for i in range(inicio, ate_bloco):
+                for tx in self.chain[i].get("tx", []):
+                    s = tx.get("from"); r = tx.get("to")
+                    a = float(tx.get("amount", 0)); f = float(tx.get("fee", 0))
+                    if s == "COINBASE":
+                        saldos[r] = saldos.get(r, 0.0) + a
+                        continue
+                    # VALIDACAO: saldo tem que ser >= custo
+                    custo = a + f
+                    if saldos.get(s, 0.0) < custo - 1e-9:
+                        # BLOCO INVALIDO (gasto duplo ja consolidado)
+                        print(f"[INDICE] Saldo negativo detectado no bloco {i}: "
+                              f"{s} tem {saldos.get(s, 0.0):.8f} precisa {custo:.8f}", flush=True)
+                        self._saldos = saldos
+                        self._ultimo_indice = i
+                        self._ultimo_bloco_valido = i - 1
+                        return None
+                    saldos[s] = saldos.get(s, 0.0) - custo
+                    saldos[r] = saldos.get(r, 0.0) + a
+
+            self._saldos = saldos
+            self._ultimo_indice = ate_bloco
+            self._ultimo_bloco_valido = ate_bloco
+            return saldos
+
+
+    def _balance_after_mempool(self, address, min_conf=1, exclude_txid=None):
+        bal = 0.0
+        n = len(self.chain)
+        for i, block in enumerate(self.chain):
+            conf = n - i
+            for tx in block.get("tx", []):
+                s = tx.get("from"); r = tx.get("to")
+                a = float(tx.get("amount", 0)); f = float(tx.get("fee", 0))
+                if s == "COINBASE":
+                    if r == address and conf >= min_conf:
+                        bal += a
+                    continue
+                if s == address:
+                    bal -= (a + f)
+                if r == address and conf >= min_conf:
+                    bal += a
+        for tx in self.mempool:
+            if tx.get("id") == exclude_txid:
+                continue
+            if tx.get("from") == address:
+                bal -= float(tx.get("amount", 0))
+                bal -= float(tx.get("fee", 0))
+        return bal
+
+    def saldo_com_pendentes(self, address, min_conf=1):
+        return max(0.0, self._balance_after_mempool(address, min_conf=min_conf))
+
+    def bloco_efetivo(self):
+        """Retorna o ultimo bloco VALIDO (ignora blocos com saldo negativo no final)."""
+        if hasattr(self, "_ultimo_bloco_valido") and self._ultimo_bloco_valido >= 0:
+            return self._ultimo_bloco_valido
+        return self.height()
+
+    def saldo_pendente_saindo(self, address):
+        t = 0.0
+        for tx in self.mempool:
+            if tx.get("from") == address:
+                t += float(tx.get("amount", 0)) + float(tx.get("fee", 0))
+        return t
+
     def save(self):
         with self.lock:
             save_json(CHAIN_FILE, self.chain)
@@ -1945,31 +2170,16 @@ class Blockchain:
         return True
 
     def valid_pow(self, block):
+        # Blocos <= checkpoint sao confiaveis (nunca recalcula PoW)
+        # Isso inclui o proprio #FORCE_CHECKPOINT_HEIGHT
+        h = int(block.get("height", -1))
+        if h <= FORCE_CHECKPOINT_HEIGHT:
+            return True
         hh = compute_pow_hash(block)
         if hh != block.get("hash"):
             return False
         target = bits_para_target(int(block["bits"]))
         return int(hh, 16) <= target
-
-    def validar_bloco_antes_de_salvar(self, block):
-        try:
-            if not self.chain:
-                return False
-
-            ultimo = self.chain[-1]
-
-            # Nunca aceitar bloco fora da sequencia
-            if int(block.get("height", -1)) != int(ultimo.get("height", -1)) + 1:
-                return False
-
-            # Nunca aceitar bloco ligado ao hash errado
-            if block.get("prev") != ultimo.get("hash"):
-                return False
-
-            return True
-
-        except Exception:
-            return False
 
     def chain_work(self, chain=None):
         if chain is None:
@@ -2005,12 +2215,13 @@ class Blockchain:
     def _balance_cached(self, address, min_conf=1):
         """Calcula saldo uma vez e guarda em cache. Invalida quando chain muda."""
         cache_key = (address, min_conf)
-        chain_len = len(self.chain)
-        if not hasattr(self, "_bal_cache"):
-            self._bal_cache = {}
-        cached = self._bal_cache.get(cache_key)
-        if cached is not None and cached[0] == chain_len:
-            return cached[1]
+        with self.lock:
+            chain_len = len(self.chain)
+            if not hasattr(self, "_bal_cache"):
+                self._bal_cache = {}
+            cached = self._bal_cache.get(cache_key)
+            if cached is not None and cached[0] == chain_len:
+                return cached[1]
         bal = 0.0
         n_blocks = chain_len
         for i, block in enumerate(self.chain):
@@ -2035,7 +2246,8 @@ class Blockchain:
                     bal -= float(tx.get("amount", 0))
                     bal -= float(tx.get("fee", 0))
         bal = max(0.0, bal)
-        self._bal_cache[cache_key] = (chain_len, bal)
+        with self.lock:
+            self._bal_cache[cache_key] = (chain_len, bal)
         return bal
 
     def balance(self, address, min_conf=1):
@@ -2109,7 +2321,16 @@ class Blockchain:
                 return False
             if not verify(pub, txid, sig):
                 return False
-            if self.balance(sender, min_conf=6) < amount + fee:
+            # ============================================
+            # 6 CONFIRMACOES OBRIGATORIAS
+            # ============================================
+            saldo_confirmado = self._balance_after_mempool(sender, min_conf=6)
+            # Ja gasto no mempool
+            gasto_pendente = 0.0
+            for mtx in self.mempool:
+                if mtx.get("from") == sender:
+                    gasto_pendente += float(mtx.get("amount", 0)) + float(mtx.get("fee", 0))
+            if saldo_confirmado - gasto_pendente < amount + fee:
                 return False
             return True
         except Exception:
@@ -2125,45 +2346,39 @@ class Blockchain:
             self.mempool.sort(key=lambda t: float(t.get("fee", 0)), reverse=True)
             self.mempool = self.mempool[:MAX_MEMPOOL_TX]
 
-    def _balance_after_mempool(self, address, min_conf=1):
-        bal = 0.0
-        n_blocks = len(self.chain)
-        for i, block in enumerate(self.chain):
-            conf = n_blocks - i
-            for tx in block.get("tx", []):
-                s = tx.get("from")
-                r = tx.get("to")
-                a = float(tx.get("amount", 0))
-                f = float(tx.get("fee", 0))
-                if s == "COINBASE":
-                    if r == address and conf >= min_conf:
-                        bal += a
-                    continue
-                if s == address:
-                    bal -= (a + f)
-                if r == address and conf >= min_conf:
-                    bal += a
-        if min_conf <= 0:
-            for tx in self.mempool:
-                if tx.get("from") == address:
-                    bal -= float(tx.get("amount", 0))
-                    bal -= float(tx.get("fee", 0))
-        return bal
-
-    def add_transaction(self, tx):
+    def add_transaction(self, tx, _broadcast=True):
         with self.lock:
+            if hasattr(self, "_ultimo_bloco_valido"):
+                if self._ultimo_bloco_valido < self.height():
+                    print(f"[TX] REJEITADA: _ultimo_bloco_valido={self._ultimo_bloco_valido} < height={self.height()}", flush=True)
+                    return False
             if not self.validate_tx(tx):
+                print(f"[TX] REJEITADA: validate_tx retornou False", flush=True)
                 return False
             if any(x.get("id") == tx["id"] for x in self.mempool):
+                print(f"[TX] REJEITADA: ja existe no mempool", flush=True)
                 return False
-            saldo_disponivel = self._balance_after_mempool(tx["from"], min_conf=6)
+            saldo_conf = self._balance_after_mempool(tx["from"], min_conf=6)
+            for mtx in self.mempool:
+                if mtx.get("from") == tx["from"]:
+                    saldo_conf -= float(mtx.get("amount", 0)) + float(mtx.get("fee", 0))
             custo_total = float(tx["amount"]) + float(tx["fee"])
-            if saldo_disponivel < custo_total:
+            print(f"[TX] saldo_conf={saldo_conf:.8f} | custo={custo_total:.8f}", flush=True)
+            if saldo_conf < custo_total:
+                print(f"[TX] REJEITADA: saldo insuficiente", flush=True)
                 return False
             self.mempool.append(tx)
             self._check_mempool_limits()
             self.save()
-            return True
+        # Broadcast fora do lock (evita deadlock)
+        if _broadcast:
+            try:
+                core = getattr(self, "_core_ref", None)
+                if core and hasattr(core, "network"):
+                    core.network.broadcast({"type": "tx", "tx": tx})
+            except Exception:
+                pass
+        return True
 
     def create_coinbase(self, address, height, txs=None):
         reward = block_reward(height)
@@ -2183,146 +2398,180 @@ class Blockchain:
         }
 
     def valid_chain(self, chain):
-        # Valida usando a rotina de consenso existente.
-        # Mantem bootstrap parcial: a chain pode comecar acima do genesis.
-        return self.valid_chain_OLD(chain)
-
-    def valid_chain_OLD(self, chain):
+        """Valida SO os blocos acima do checkpoint. Blocos antigos sao confiados."""
         try:
-            if not chain:
-                return False
-            if len(chain) > CHECKPOINT_HEIGHT:
-                checkpoint_bloco = chain[CHECKPOINT_HEIGHT]
-                if checkpoint_bloco.get("hash") != CHECKPOINT_HASH:
-                    print("[DOGK v2] CHECKPOINT #12000 INVALIDO", flush=True)
-                    return False
-            if len(chain) > CHECKPOINT_HEIGHT_2:
-                checkpoint_bloco_2 = chain[CHECKPOINT_HEIGHT_2]
-                if checkpoint_bloco_2.get("hash") != CHECKPOINT_HASH_2:
-                    print("[DOGK v2] CHECKPOINT #13436 INVALIDO", flush=True)
-                    return False
-            g = chain[0]
-            # Bootstrap: chain vinda da rede pode comecar em altura > 0
-            # (so valida se comecar do genesis real)
-            if g.get("height") != 0:
-                # Aceita como chain parcial (bootstrap)
-                # Valida so os hashes internos e PoW
-                for i in range(1, len(chain)):
-                    b = chain[i]
-                    if b.get("prev") != chain[i-1].get("hash"):
-                        return False
-                    if not self.valid_pow(b):
-                        return False
-                return True
-            if g.get("prev") != "0" * 64:
-                return False
-            if g.get("prev") != "0" * 64:
-                return False
-            if int(g.get("bits", 0)) not in (INITIAL_DIFFICULTY, 0x207fffff):
-                return False
-            if not g.get("hash"):
-                return False
-            bits_gen = int(g.get("bits", INITIAL_DIFFICULTY))
-            target_gen = bits_para_target(bits_gen)
-            if int(g["hash"], 16) > target_gen:
-                return False
-            for i, b in enumerate(chain):
-                # Pula validacao rigorosa dos primeiros 1000 blocos
-                if False:  # BUGFIX
-                    if int(b["height"]) != i:
-                        return False
-                    if i > 0 and b["prev"] != chain[i - 1]["hash"]:
-                        return False
-                    continue
-                if i > 0 and i % CHECKPOINT_INTERVAL == 0:
-                    if i < len(chain):
-                        if chain[i]["hash"] != b["hash"]:
-                            return False
-                if i == 0:
-                    continue
-                if b["prev"] != chain[i - 1]["hash"]:
-                    return False
-                if not self.valid_pow(b):
-                    return False
-                # === MTP (median time past) ===
-                if i > 11:
-                    _times = sorted(int(chain[j].get("time",0)) for j in range(i-11, i))
-                    _mtp = _times[len(_times)//2]
-                    if int(b.get("time",0)) <= _mtp:
-                        print(f"[VALID] Bloco #{i} MTP invalido", flush=True)
-                        return False
-                # === CHAIN_ID (obrigatorio a partir do 20000) ===
-                _cid = b.get("chain_id", None)
-                if i >= HARDFORK_HEIGHT:
-                    if _cid != CHAIN_ID:
-                        print(f"[VALID] Bloco #{i} SEM chain_id apos hardfork", flush=True)
-                        return False
-                else:
-                    if _cid is not None and _cid != CHAIN_ID:
-                        print(f"[VALID] Bloco #{i} chain_id errado", flush=True)
-                        return False
-                if int(b["time"]) < int(chain[i - 1]["time"]):
-                    return False
-                # MTP NAO e validado no bootstrap
-                pass
-
-                if len(b.get("tx", [])) > MAX_BLOCK_TX:
-                    return False
-                # Bits NAO sao validados no bootstrap (confia na chain)
-                # So valida se for chain recebida de peer (reorg_chain)
-                pass
-                txs = b.get("tx", [])
-                if not txs:
-                    return False
-                coinbases = 0
-                seen = set()
-                for tx in txs:
-                    txid = tx.get("id")
-                    if not txid or txid in seen:
-                        return False
-                    seen.add(txid)
-                    if tx.get("from") == "COINBASE":
-                        coinbases += 1
-                        if coinbases > 1:
-                            return False
-                        expected = block_reward(i)
-                        # Validacao de saldo DESABILITADA no sync (muito pesada)
-                        # O saldo e validado no validate_tx quando chega tx nova
-                        pass
-                if coinbases != 1:
-                    return False
-                if i > 11964:
-                    gastos_por_endereco = {}
-                    for tx in txs:
-                        if tx.get("from") == "COINBASE":
-                            continue
-                        sender = tx.get("from")
-                        valor = float(tx.get("amount", 0)) + float(tx.get("fee", 0))
-                        gastos_por_endereco[sender] = gastos_por_endereco.get(sender, 0.0) + valor
-                    for endereco, total in gastos_por_endereco.items():
-                        saldo_hist = 0.0
-                        for j in range(i):
-                            for tx2 in chain[j].get("tx", []):
-                                s2 = tx2.get("from")
-                                r2 = tx2.get("to")
-                                a2 = float(tx2.get("amount", 0))
-                                f2 = float(tx2.get("fee", 0))
-                                if s2 == "COINBASE":
-                                    if r2 == endereco:
-                                        saldo_hist += a2
-                                    continue
-                                if s2 == endereco:
-                                    saldo_hist -= (a2 + f2)
-                                if r2 == endereco:
-                                    saldo_hist += a2
-                        if saldo_hist < total:
-                            return False
-            return True
+            return self._valid_chain_inner(chain)
         except Exception as e:
             import traceback
-            print("[DOGK v2] valid_chain FALHOU:", e)
+            print(f"[VALID] EXCECAO: {e}", flush=True)
             traceback.print_exc()
             return False
+
+    def _valid_chain_inner(self, chain):
+        """Logica interna do valid_chain (com try/except no wrapper)."""
+        if not chain:
+            print("[VALID] chain vazia", flush=True)
+            return False
+        cp_h = self.checkpoint.get("height", -1)
+        cp_hash = self.checkpoint.get("hash", "0" * 64)
+        print(f"[VALID] Iniciando validacao: total={len(chain)} blocos, checkpoint=#{cp_h}", flush=True)
+        if len(chain) - 1 < cp_h:
+            print(f"[VALID] Chain menor que checkpoint (len={len(chain)} cp_h={cp_h})", flush=True)
+            return False
+        if cp_h >= 0:
+            hash_cp = chain[cp_h].get("hash") if cp_h < len(chain) else None
+            if hash_cp != cp_hash:
+                print(f"[VALID] Checkpoint mismatch no bloco {cp_h}", flush=True)
+                print(f"[VALID]   esperado: {cp_hash[:24]}...", flush=True)
+                print(f"[VALID]   recebido: {str(hash_cp)[:24]}...", flush=True)
+                return False
+        inicio = max(1, cp_h, FORCE_CHECKPOINT_HEIGHT)
+        # Verifica se o prev do bloco #FORCE_CHECKPOINT_HEIGHT bate com o hash do #FORCE_CHECKPOINT_HEIGHT-1
+        if inicio > 0 and inicio < len(chain):
+            prev_esperado = chain[inicio - 1].get("hash")
+            prev_recebido = chain[inicio].get("prev")
+            if prev_esperado != prev_recebido:
+                print(f"[VALID] prev do bloco #{inicio} nao bate com hash do #{inicio-1}", flush=True)
+                print(f"[VALID]   esperado: {str(prev_esperado)[:24]}...", flush=True)
+                print(f"[VALID]   recebido: {str(prev_recebido)[:24]}...", flush=True)
+                return False
+        print(f"[VALID] Validando de #{inicio} ate #{len(chain)-1} (FORCE_CHECKPOINT_HEIGHT={FORCE_CHECKPOINT_HEIGHT})", flush=True)
+        for i in range(inicio, len(chain)):
+            b = chain[i]
+            prev = chain[i - 1]
+            # ----- 1. prev hash -----
+            if b.get("prev") != prev.get("hash"):
+                print(f"[VALID] [MOTIVO] BLOCO #{i}: prev hash nao bate", flush=True)
+                print(f"[VALID]   esperado: {prev.get('hash')[:24]}...", flush=True)
+                print(f"[VALID]   recebido: {str(b.get('prev'))[:24]}...", flush=True)
+                return False
+            # ----- 2. PoW -----
+            if not self.valid_pow(b):
+                print(f"[VALID] [MOTIVO] BLOCO #{i}: PoW invalido (hash > target ou hash incorreto)", flush=True)
+                print(f"[VALID]   hash:   {b.get('hash')[:24]}...", flush=True)
+                print(f"[VALID]   bits:   0x{int(b.get('bits', 0)):08X}", flush=True)
+                return False
+            # ----- 3. timestamp -----
+            t_atual = int(b.get("time", 0))
+            t_ant = int(prev.get("time", 0))
+            if t_atual <= t_ant:
+                print(f"[VALID] [MOTIVO] BLOCO #{i}: timestamp fora de ordem", flush=True)
+                print(f"[VALID]   atual:    {t_atual}", flush=True)
+                print(f"[VALID]   anterior: {t_ant}", flush=True)
+                return False
+            # ----- 4. bloco novo (acima do checkpoint) -----
+            if i > cp_h:
+                if not self._validar_bloco_novo(chain, i):
+                    print(f"[VALID] [MOTIVO] BLOCO #{i}: _validar_bloco_novo retornou False (motivo acima)", flush=True)
+                    return False
+        print(f"[VALID] OK - todos os {len(chain)-inicio} blocos validados", flush=True)
+        return True
+
+    def _validar_bloco_novo(self, chain, i):
+        """Valida bits + txs + saldo de um bloco NOVO.
+        Anti-gasto-duplo: aplica as Txs SEQUENCIALMENTE ao saldo."""
+        if i <= FORCE_CHECKPOINT_HEIGHT:
+            return True   # bloco confiavel - nao revalida
+        b = chain[i]
+        bits_recebidos = int(b.get("bits", INITIAL_DIFFICULTY))
+        bits_esperados = self.expected_difficulty_for_chain(
+            chain, i, candidate_time=int(b.get("time", 0))
+        )
+        if bits_recebidos != bits_esperados:
+            print(f"[VALID] bits invalidos no bloco {i}: recebido=0x{bits_recebidos:08X} esperado=0x{bits_esperados:08X}", flush=True)
+            return False
+
+        # Timestamp estritamente maior que o anterior
+        if i > 0:
+            t_ant = int(chain[i-1].get("time", 0))
+            t_atual = int(b.get("time", 0))
+            if t_atual <= t_ant:
+                print(f"[VALID] timestamp nao-estrito no bloco {i}: atual={t_atual} anterior={t_ant}", flush=True)
+                return False
+
+        # MTP (median time past): time do bloco > mediana dos 11 anteriores
+        if i > 11:
+            mtp = median_time_past(chain[:i], 11)
+            if int(b.get("time", 0)) <= mtp:
+                print(f"[VALID] timestamp <= MTP no bloco {i}: bloco={int(b.get('time',0))} mtp={mtp}", flush=True)
+                return False
+
+        txs = b.get("tx", [])
+        if not txs:
+            print(f"[VALID] Bloco #{i}: sem TXs", flush=True)
+            return False
+        if len(txs) > MAX_BLOCK_TX:
+            print(f"[VALID] Bloco #{i}: TXs demais ({len(txs)} > {MAX_BLOCK_TX})", flush=True)
+            return False
+
+        # 1. Valida assinaturas e conta coinbases
+        coinbases = 0
+        vistos = set()
+        taxas_bloco = 0.0
+        for tx in txs:
+            txid = tx.get("id")
+            if not txid:
+                print(f"[VALID] Bloco #{i}: TX sem id", flush=True)
+                return False
+            if txid in vistos:
+                print(f"[VALID] Bloco #{i}: TX duplicada {txid[:16]}", flush=True)
+                return False
+            vistos.add(txid)
+            if tx.get("from") == "COINBASE":
+                coinbases += 1
+                if coinbases > 1:
+                    print(f"[VALID] Bloco #{i}: mais de 1 coinbase", flush=True)
+                    return False
+                continue
+            try:
+                pub = bytes.fromhex(tx["pubkey"])
+            except Exception as e:
+                print(f"[VALID] Bloco #{i}: pubkey invalida em {txid[:16]}: {e}", flush=True)
+                return False
+            if address_from_pub(pub) != tx.get("from"):
+                print(f"[VALID] Bloco #{i}: pubkey nao bate com from em {txid[:16]}", flush=True)
+                return False
+            if h(tx_message(tx).encode()) != txid:
+                print(f"[VALID] Bloco #{i}: hash da TX nao bate em {txid[:16]}", flush=True)
+                return False
+            if not verify(pub, txid, tx.get("signature", "")):
+                print(f"[VALID] Bloco #{i}: assinatura invalida em {txid[:16]}", flush=True)
+                return False
+            taxas_bloco += float(tx.get("fee", 0))
+        if coinbases != 1:
+            print(f"[VALID] Bloco #{i}: esperado 1 coinbase, encontrado {coinbases}", flush=True)
+            return False
+        for tx in txs:
+            if tx.get("from") == "COINBASE":
+                if abs(float(tx.get("amount", 0)) - (block_reward(i) + taxas_bloco)) > 1e-6:
+                    print(f"[VALID] coinbase errada no bloco {i}: recebido={float(tx.get('amount', 0))} esperado={block_reward(i) + taxas_bloco}", flush=True)
+                    return False
+                break
+
+        # 2. Saldo de cada endereco ANTES deste bloco
+        saldos_antes = self._construir_indice_saldos(ate_bloco=i, chain=chain)
+        if saldos_antes is None:
+            print(f"[VALID] bloco {i} rejeitado: chain anterior tem saldo negativo", flush=True)
+            return False
+        saldos = dict(saldos_antes)
+
+        # 3. Anti-gasto-duplo: aplica sequencialmente
+        for tx in txs:
+            s = tx.get("from")
+            r = tx.get("to")
+            a = float(tx.get("amount", 0))
+            f = float(tx.get("fee", 0))
+            if s == "COINBASE":
+                saldos[r] = saldos.get(r, 0.0) + a
+                continue
+            custo = a + f
+            if saldos.get(s, 0.0) < custo - 1e-9:
+                print(f"[VALID] gasto duplo no bloco {i}: {s} tem {saldos.get(s, 0.0):.8f} precisa {custo:.8f}", flush=True)
+                return False
+            saldos[s] = saldos.get(s, 0.0) - custo
+            saldos[r] = saldos.get(r, 0.0) + a
+        return True
+
 
 
     def reorg_chain(self, nova_chain):
@@ -2344,63 +2593,145 @@ class Blockchain:
                     return False
                 if b.get("prev") != nova_chain[i-1].get("hash"):
                     return False
-            # Validacao completa antes de aceitar reorg
-            if not self.valid_chain(nova_chain):
-                print("[DOGK v2] Reorg rejeitado: chain invalida", flush=True)
-                return False
+
+            # ============================================
+            # REORG: devolve TXs dos blocos revertidos pra mempool
+            # ============================================
+            blocos_revertidos = self.chain[fork_point:]
+            ids_confirmados_nova = set()
+            for blk in nova_chain[fork_point:]:
+                for tx in blk.get("tx", []):
+                    if tx.get("from") != "COINBASE":
+                        ids_confirmados_nova.add(tx.get("id"))
+
+            txs_devolvidas = 0
+            for blk in blocos_revertidos:
+                for tx in blk.get("tx", []):
+                    if tx.get("from") == "COINBASE":
+                        continue
+                    txid = tx.get("id")
+                    if txid in ids_confirmados_nova:
+                        # TX ainda confirmada na nova chain -> nao devolve
+                        continue
+                    # TX saiu da chain -> volta pra mempool (se valida)
+                    if any(m.get("id") == txid for m in self.mempool):
+                        continue
+                    if self.validate_tx(tx):
+                        self.mempool.append(tx)
+                        txs_devolvidas += 1
+
+            if txs_devolvidas > 0:
+                print(f"[REORG] {txs_devolvidas} TXs devolvidas ao mempool", flush=True)
+
             self.chain = list(nova_chain)
             self.mempool = [tx for tx in self.mempool if not self.tx_exists(tx['id'])]
+            self._check_mempool_limits()
             self.save()
             return True
 
     def accept_chain(self, new_chain):
         with self.lock:
-            # Bootstrap: chain local vazia -> valida a chain recebida
+            if not new_chain:
+                return False
+            cp_h = self.checkpoint.get("height", -1)
+            cp_hash = self.checkpoint.get("hash", "0" * 64)
+            if len(new_chain) - 1 < cp_h:
+                return False
+            if cp_h >= 0 and new_chain[cp_h].get("hash") != cp_hash:
+                print("[DOGK v2] accept_chain: checkpoint nao bate", flush=True)
+                return False
             if not self.chain:
-                if not new_chain:
-                    return False
-                if not self.valid_chain(new_chain):
-                    print("[DOGK v2] Bootstrap rejeitado: chain invalida", flush=True)
+                if not self.valid_pow(new_chain[-1]):
                     return False
                 self.chain = list(new_chain)
                 self._aguardando_sync = False
                 self.save()
-                print(f"[DOGK v2] Bootstrap: chain validada e adotada ({len(new_chain)} blocos)", flush=True)
+                print(f"[DOGK v2] Bootstrap: chain adotada ({len(new_chain)} blocos)", flush=True)
                 return True
-            if len(new_chain) < len(self.chain):
+            if len(new_chain) <= len(self.chain):
+                return False
+            if self.chain_work(new_chain) <= self.chain_work(self.chain):
                 return False
             fork_point = 0
             for i in range(min(len(new_chain), len(self.chain))):
-                if new_chain[i]["hash"] != self.chain[i]["hash"]:
+                if new_chain[i].get("hash") != self.chain[i].get("hash"):
                     fork_point = i
                     break
             else:
                 fork_point = len(self.chain)
-            if len(self.chain) - fork_point > CHECKPOINT_DEPTH:
+            if fork_point < cp_h:
+                print(f"[DOGK v2] accept_chain: fork abaixo do checkpoint", flush=True)
                 return False
-            if self.chain_work(new_chain) <= self.chain_work(self.chain):
+            if not self.valid_chain(new_chain):
+                print("[DOGK v2] accept_chain: valid_chain rejeitou", flush=True)
                 return False
-
-            self.chain = new_chain
+            # Detecta fork: se fork_point < len(self.chain), e reorg
+            if fork_point < len(self.chain):
+                print(f"[DOGK v2] REORG detectado: fork no bloco {fork_point}", flush=True)
+                # Devolve TXs dos blocos abandonados pra mempool
+                blocos_abandonados = self.chain[fork_point:]
+                ids_na_nova = set()
+                for blk in new_chain[fork_point:]:
+                    for tx in blk.get("tx", []):
+                        if tx.get("from") != "COINBASE":
+                            ids_na_nova.add(tx.get("id"))
+                devolvidas = 0
+                for blk in blocos_abandonados:
+                    for tx in blk.get("tx", []):
+                        if tx.get("from") == "COINBASE":
+                            continue
+                        txid = tx.get("id")
+                        if txid in ids_na_nova:
+                            continue
+                        if any(m.get("id") == txid for m in self.mempool):
+                            continue
+                        if self.validate_tx(tx):
+                            self.mempool.append(tx)
+                            devolvidas += 1
+                if devolvidas > 0:
+                    print(f"[REORG] {devolvidas} TXs devolvidas ao mempool", flush=True)
+                if not self.reorg_chain(new_chain):
+                    print("[DOGK v2] REORG falhou", flush=True)
+                    return False
+                return True
+            # Sem fork: so append
+            self.chain = list(new_chain)
             self.mempool = [tx for tx in self.mempool if not self.tx_exists(tx["id"])]
             self._check_mempool_limits()
             self.save()
+            if hasattr(self, "_saldo_cache"):
+                del self._saldo_cache
+            print(f"[DOGK v2] Chain aceita: {len(self.chain)} blocos", flush=True)
             return True
 
 
 
-IRC_SERVER = "irc.libera.chat"
-IRC_SERVERS = [
-    ("irc.libera.chat", 6697),
-    ("irc.oftc.net", 6697),
-    ("irc.efnet.org", 6697),
-    ("irc.rizon.net", 6697),
-    ("irc.dal.net", 6697),
-]
-IRC_PORT = 6697
-IRC_CHANNEL = "#dogkong"
-IRC_NICK_PREFIX = "dogk_"
-IRC_TIMEOUT = 10
+IRC_DISABLED = True  # modulo IRC removido
+
+def resolver_dns_seeds(seeds=None):
+    """Resolve dominios DNS para IPs (igual Bitcoin/Dogecoin).
+    Retorna lista de IPs (sem porta)."""
+    if seeds is None:
+        seeds = DEFAULT_SEEDS
+    ips = set()
+    for seed in seeds:
+        # Se ja e IP, adiciona direto
+        if seed.count(".") == 3 and not any(c.isalpha() for c in seed):
+            ips.add(seed)
+            continue
+        host = seed.split(":")[0]
+        try:
+            results = socket.getaddrinfo(host, P2P_PORT, socket.AF_INET, socket.SOCK_STREAM)
+            for res in results:
+                ip = res[4][0]
+                ips.add(ip)
+            print(f"[DNS] {host} -> {len(results)} IP(s)")
+        except socket.gaierror as e:
+            print(f"[DNS] Falha ao resolver {host}: {e}")
+        except Exception as e:
+            print(f"[DNS] Erro em {host}: {e}")
+    return list(ips)
+
 
 def resolver_duckdns():
     """Resolve o DNS seed do DuckDNS."""
@@ -2413,189 +2744,9 @@ def resolver_duckdns():
             results = socket.getaddrinfo(seed, P2P_PORT, socket.AF_INET, socket.SOCK_STREAM)
             for res in results:
                 ips.add(res[4][0])
-            pass  # DUCKDNS logado depois; import sys; sys.stdout.flush()
-        except Exception as e:
-            pass  # DUCKDNS falha silenciosa
+        except Exception:
+            pass
     return list(ips)
-
-def postar_irc(meu_ip, meu_onion=None):
-    """IRC DESABILITADO."""
-    return
-
-
-def resolver_irc(irc_servers=None):
-    """IRC DESABILITADO - so usa seeds.json local."""
-    print("[IRC] Desabilitado (usa so seeds.json)", flush=True)
-    return []
-
-def _resolver_irc_server(IRC_SERVER, IRC_PORT, ips):
-    import socket, ssl, time, threading, secrets, re
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        s = socket.create_connection((IRC_SERVER, IRC_PORT), timeout=IRC_TIMEOUT)
-        s = ctx.wrap_socket(s, server_hostname=IRC_SERVER)
-        # Nick unico
-        import secrets
-        nick = IRC_NICK_PREFIX + secrets.token_hex(4)
-        s.sendall(f"NICK {nick}\r\n".encode())
-        s.sendall(f"USER {nick} 0 * :DogKong\r\n".encode())
-        # Espera 2s e entra no canal
-        time.sleep(2)
-        s.sendall(f"JOIN {IRC_CHANNEL}\r\n".encode())
-        # Le mensagens por 10s
-        s.settimeout(10)
-        inicio = time.time()
-        buf = b""
-        while time.time() - inicio < 10:
-            try:
-                data = s.recv(4096)
-                if not data:
-                    break
-                buf += data
-                for linha in buf.decode(errors="ignore").split("\r\n"):
-                    # Procura IPs em mensagens
-                    import re
-                    # So captura IPs que vieram de mensagens DOGKPEER (nao lixo do canal)
-                    for m in re.findall(r'DOGKPEER\s+([a-z2-7]{16,56}\.onion)', linha):
-                        ips.add(m)
-                    for m in re.findall(r'DOGKPEER\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):', linha):
-                        ips.add(m)
-            except socket.timeout:
-                break
-        s.sendall(f"QUIT :bye\r\n".encode())
-        s.close()
-        pass  # IRC logado depois; import sys; sys.stdout.flush()
-    except Exception as e:
-        pass  # IRC falha silenciosa
-    return list(ips)
-
-
-
-def resolver_remote_seeds():
-    """Le o Gist remoto e retorna (irc_servers, dns_seeds + onion)."""
-    import urllib.request, json
-    irc = []
-    dns = []
-    try:
-        with urllib.request.urlopen(REMOTE_SEEDS_URL, timeout=10) as r:
-            data = json.loads(r.read())
-        for s in data.get("irc", []):
-            if ":" in s:
-                host, port = s.split(":", 1)
-                try:
-                    port = int(port)
-                except ValueError:
-                    port = 6697
-            else:
-                host, port = s, 6697
-            irc.append((host, port))
-        dns = [s for s in data.get("dns", []) if isinstance(s, str)]
-        onion = [s for s in data.get("onion", []) if isinstance(s, str)]
-        dns = dns + onion
-    except Exception as e:
-        print(f"[GIST] Falha: {e}")
-    return irc, dns
-
-
-def resolver_dns_seeds(seeds=None):
-    """
-    Resolve dominios DNS para IPs (igual Bitcoin/Dogecoin).
-    Retorna lista de IPs (sem porta).
-    """
-    if seeds is None:
-        seeds = DEFAULT_SEEDS
-    
-    ips = set()
-    for seed in seeds:
-        # Se j  IP, adiciona direto
-        if seed.count(".") == 3 and not any(c.isalpha() for c in seed):
-            ips.add(seed)
-            continue
-        
-        # Remove porta se tiver
-        host = seed.split(":")[0]
-        
-        try:
-            # Resolve DNS (IPv4)
-            results = socket.getaddrinfo(host, P2P_PORT, socket.AF_INET, socket.SOCK_STREAM)
-            for res in results:
-                ip = res[4][0]
-                ips.add(ip)
-            print(f"[DNS] {host} -> {len(results)} IP(s)")
-        except socket.gaierror as e:
-            print(f"[DNS] Falha ao resolver {host}: {e}")
-        except Exception as e:
-            print(f"[DNS] Erro em {host}: {e}")
-    
-    return list(ips)
-
-
-def tentar_upnp(porta=18555):
-    """
-    Tenta abrir a porta via UPnP (funciona em 80% dos roteadores domesticos).
-    Pure Python - compativel com PyInstaller.
-    """
-    try:
-        import upnpclient
-    except ImportError:
-        print("[UPnP] Biblioteca upnpclient nao instalada - pulando")
-        return False
-    
-    try:
-        # Descobre dispositivos UPnP na rede
-        print("[UPnP] Procurando roteadores UPnP...")
-        devices = upnpclient.discover(timeout=3)
-        
-        if not devices:
-            print("[UPnP] Nenhum roteador UPnP encontrado")
-            return False
-        
-        # Pra cada dispositivo, tenta achar o servico de WAN
-        for device in devices:
-            try:
-                service = None
-                for s in device.services:
-                    if "WANIPConnection" in s.service_type or "WANPPPConnection" in s.service_type:
-                        service = s
-                        break
-                
-                if not service:
-                    continue
-                
-                # Pega o IP local
-                import socket
-                s_temp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s_temp.connect(("8.8.8.8", 80))
-                ip_local = s_temp.getsockname()[0]
-                s_temp.close()
-                
-                # Adiciona o mapeamento
-                service.AddPortMapping(
-                    NewRemoteHost="",
-                    NewExternalPort=porta,
-                    NewProtocol="TCP",
-                    NewInternalPort=porta,
-                    NewInternalClient=ip_local,
-                    NewEnabled="1",
-                    NewPortMappingDescription="DogKong P2P",
-                    NewLeaseDuration="0"
-                )
-                
-                print(f"[UPnP] Porta {porta} aberta automaticamente!")
-                return True
-                
-            except Exception as e:
-                print(f"[UPnP] Falha no dispositivo {device.friendly_name}: {e}")
-                continue
-        
-        print("[UPnP] Nenhum roteador compativel encontrado")
-        return False
-        
-    except Exception as e:
-        print(f"[UPnP] Erro geral: {e}")
-        return False
 
 
 class Network:
@@ -2628,17 +2779,10 @@ class Network:
         self.seen_blocks = set()
         self._chain_buffer = []
         self._chain_peer = None
-        self._headers_sync = []
-        self._blocks_sync = []
-        self._headers_sync_peer = None
-        self._blocks_sync_start = 0
-        self._headers_sync_total = 0
-        self._sync_in_progress = False
         self.seen_txs = set()
         self.seen_lock = threading.Lock()
         # Seeds
         self.seeds = []
-        self.irc_servers = []
         self.load_peers()
         self.load_seeds()
         def upnp_bg():
@@ -2673,6 +2817,18 @@ class Network:
         with self.conn_lock:
             if host in self.active_connections:
                 return self.active_connections[host]
+        # Nao reconecta se ja existe conexao ativa com o mesmo IP (ex: dominio vs IP)
+        try:
+            ip_alvo = socket.gethostbyname(host)
+        except Exception:
+            ip_alvo = host
+        with self.conn_lock:
+            for h_ativo, sock_ativo in self.active_connections.items():
+                try:
+                    if socket.gethostbyname(h_ativo) == ip_alvo:
+                        return sock_ativo
+                except Exception:
+                    continue
         try:
             s = socket.create_connection((host, P2P_PORT), timeout=timeout)
             s.settimeout(None)
@@ -2791,21 +2947,7 @@ class Network:
                         self.peers[host]["last_height"] = int(msg.get("height", 0))
                     if "last_hash" in msg:
                         self.peers[host]["last_hash"] = msg.get("last_hash")
-            if typ == "notify":
-                # DOGK_UPDATE_V2_APPLIED
-                msg_text = msg.get("text", "")
-                msg_link = msg.get("link", "")
-                if msg_text:
-                    full = f"[REDE] {msg_text}"
-                    if msg_link:
-                        full += f" | {msg_link}"
-                    add_notificacao(full)
-                    try:
-                        self.core.update_blink()
-                    except Exception:
-                        pass
-                    self.core.schedule_refresh()
-            elif typ == "ping":
+            if typ == "ping":
                 self._enfileirar(host, {"type": "pong"})
             elif typ == "pong":
                 pass
@@ -2818,8 +2960,7 @@ class Network:
                     "difficulty": self.core.bc.difficulty(),
                     "hashrate": self.core.bc.hashrate_rede(),
                     "user_agent": f"DogKong-v2/{VERSION}",
-                    "is_hub": HUB_MODE, "is_seed": SEED_ONLY,
-                    "is_principal": SOU_PRINCIPAL, "onion": self.onion_address
+                    "onion": self.onion_address
                 })
             elif typ == "get_peers":
                 with self.lock:
@@ -2830,16 +2971,16 @@ class Network:
                 for p in msg.get("peers", [])[:MAX_PEERS]:
                     self.add_peer(p, outbound=True)
             elif typ == "get_chain":
+                desde_bloco = max(0, int(msg.get("desde", 0)))
                 with self.core.bc.lock:
-                    chain = list(self.core.bc.chain)
-                # Manda em lotes de 500 blocos
+                    chain = list(self.core.bc.chain[desde_bloco:])
                 TAM = 500
                 total = len(chain)
+                self.core.log(f"[P2P] get_chain desde #{desde_bloco} -> {total} blocos")
                 for i in range(0, total, TAM):
                     lote = chain[i:i+TAM]
-                    self._enfileirar(host, {"type": "chain_chunk", "chunk": lote, "start": i, "total": total})
-                # Sinaliza fim
-                self._enfileirar(host, {"type": "chain_done", "total": total})
+                    self._enfileirar(host, {"type": "chain_chunk", "chunk": lote, "start": desde_bloco + i, "total": total})
+                self._enfileirar(host, {"type": "chain_done", "total": total, "desde": desde_bloco})
             elif typ == "chain_chunk":
                 chunk = msg.get("chunk", [])
                 start = int(msg.get("start", 0))
@@ -2852,6 +2993,12 @@ class Network:
                         return
                     if start == 0:
                         self._chain_buffer = []
+                    else:
+                        if self._chain_buffer:
+                            esperado = self._chain_buffer[-1].get("height", -1) + 1
+                            if start != esperado:
+                                self.core.log(f"[CHAIN] Chunk fora de ordem: start={start}, esperado={esperado} - resetando")
+                                self._chain_buffer = []
                     self._chain_buffer.extend(chunk)
                 self.core.log(f"[P2P] chain_chunk: {len(chunk)} blocos (start={start}) | buffer={len(self._chain_buffer)}")
             elif typ == "chain_done":
@@ -2867,29 +3014,42 @@ class Network:
                 if h0 < 0:
                     self.core.log(f"[CHAIN] {host} altura invalida")
                     return
-                self.core.log(f"[CHAIN] {host} enviou {len(buf)} blocos (de #{h0}). Validando...")
-                if not self.core.bc.valid_chain(buf):
-                    self.core.log(f"[CHAIN] {host} INVALIDA -> descartando")
-                    return
+                self.core.log(f"[CHAIN] {host} enviou {len(buf)} blocos (de #{h0} ate #{buf[-1].get('height', -1)}). Validando...")
+                if len(buf) < 100:
+                    self.core.log(f"[CHAIN] ATENCAO: buffer muito pequeno ({len(buf)}), provavelmente incompleto")
                 with self.core.bc.lock:
-                    local = self.core.bc.chain
-                    if h0 == 0:
+                    local = list(self.core.bc.chain)
+                # Se o buffer começa no 0, é bootstrap total
+                if h0 == 0:
+                    if not self.core.bc.valid_chain(buf):
+                        self.core.log(f"[CHAIN] {host} INVALIDA -> descartando")
+                        return
+                    with self.core.bc.lock:
                         self.core.bc.chain = list(buf)
                         self.core.bc.save()
-                        self.core.log(f"[CHAIN] {host} bootstrap -> {len(buf)} blocos")
-                    elif h0 <= len(local):
-                        if h0 == len(local):
-                            self.core.bc.chain = local + buf
+                    self.core.log(f"[CHAIN] {host} bootstrap -> {len(buf)} blocos")
+                else:
+                    # Verifica se o fork point bate
+                    if h0 > len(local):
+                        self.core.log(f"[CHAIN] {host} pediu desde #{h0} mas local so tem #{len(local)}")
+                        return
+                    # Confere hash do bloco anterior
+                    if h0 > 0 and local[h0-1].get("hash") != buf[0].get("prev"):
+                        self.core.log(f"[CHAIN] {host} fork point #{h0-1} nao bate -> descartando")
+                        return
+                    # Valida so os blocos novos
+                    if not self.core.bc.valid_chain(buf):
+                        self.core.log(f"[CHAIN] {host} INVALIDA -> descartando")
+                        return
+                    with self.core.bc.lock:
+                        nova = local[:h0] + list(buf)
+                        if self.core.bc.chain_work(nova) > self.core.bc.chain_work(local):
+                            self.core.bc.chain = nova
                             self.core.bc.save()
-                            self.core.log(f"[CHAIN] {host} continuacao -> {len(self.core.bc.chain)} blocos")
+                            self.core.log(f"[CHAIN] {host} continuacao -> {len(nova)} blocos")
                         else:
-                            nova = local[:h0] + buf
-                            if self.core.bc.chain_work(nova) > self.core.bc.chain_work(local):
-                                self.core.bc.chain = nova
-                                self.core.bc.save()
-                                self.core.log(f"[CHAIN] {host} fork com mais work -> substituiu")
-                            else:
-                                self.core.log(f"[CHAIN] {host} fork com menos work -> ignorado")
+                            self.core.log(f"[CHAIN] {host} work menor -> ignorado")
+                            return
                 try:
                     self.core._sincronizado = True
                 except:
@@ -2917,115 +3077,31 @@ class Network:
                     for b in self.core.bc.chain[start:start + 2000]:
                         headers.append({"height": b["height"], "hash": b["hash"], "prev": b["prev"], "time": b["time"], "bits": b["bits"]})
                 self._enfileirar(host, {"type": "headers", "headers": headers})
-            elif typ == "headers":
-                headers = msg.get("headers", [])
-                if not headers:
-                    self._sync_in_progress = False
-                    return
-                # Valida encadeamento dos headers antes de baixar blocos
-                for j,h in enumerate(headers):
-                    if not h.get("hash") or not h.get("prev"):
-                        self.core.log(f"[HEADERS] Rejeitado: header incompleto de {host}")
-                        return
-                    if j > 0 and h.get("prev") != headers[j-1].get("hash"):
-                        self.core.log(f"[HEADERS] Rejeitado: encadeamento invalido de {host}")
-
-                        # Peer enviou headers quebrados: descarta tudo e tenta outro peer.
-                        self._sync_in_progress = False
-                        self._headers_sync = []
-                        self._blocks_sync = []
-                        self._headers_sync_peer = None
-                        self._headers_sync_total = 0
-
-                        with self.lock:
-                            info = self.peers.get(host)
-                            if info is not None:
-                                info["failures"] = int(info.get("failures", 0)) + 1
-                                info["next_retry"] = time.time() + 60
-
-                        with self.conn_lock:
-                            candidatos = [
-                                h for h in self.active_connections
-                                if h != host and h != self.public_ip
-                            ]
-
-                        if candidatos:
-                            import random
-                            outro = random.choice(candidatos)
-                            self.core.log(f"[SYNC] Peer {host} rejeitado. Tentando outro peer: {outro}")
-                            threading.Thread(
-                                target=self.sync_chain,
-                                args=(outro,),
-                                daemon=True
-                            ).start()
-                        else:
-                            self.core.log("[SYNC] Nenhum outro peer ativo disponível; aguardando descoberta.")
-                        return
-                self._headers_sync = list(headers)
-                self._headers_sync_peer = host
-                self._headers_sync_total = len(headers)
-                self._blocks_sync = []
-                self._blocks_sync_start = int(headers[0].get("height", 0))
-                self.core.log(f"[HEADERS] {host}: {len(headers)} headers validos")
-                self._enfileirar(host, {"type": "get_blocks", "start": self._blocks_sync_start})
             elif typ == "get_blocks":
                 start = max(0, int(msg.get("start", 0)))
                 with self.core.bc.lock:
                     blocks = list(self.core.bc.chain[start:start + 500])
                 self._enfileirar(host, {"type": "blocks", "blocks": blocks})
-            elif typ == "blocks":
-                blocks = msg.get("blocks", [])
-                if not blocks:
-                    self.core.log(f"[SYNC] {host}: nenhum bloco recebido")
-                    return
-                if self._headers_sync_peer != host:
-                    return
-                # Confere os blocos contra os headers recebidos
-                for j,b in enumerate(blocks):
-                    idx = int(b.get("height", -1)) - int(self._headers_sync[0].get("height", 0))
-                    if idx < 0 or idx >= len(self._headers_sync):
-                        self.core.log(f"[BLOCKS] Altura fora dos headers: {host}")
-                        return
-                    h = self._headers_sync[idx]
-                    if b.get("hash") != h.get("hash") or b.get("prev") != h.get("prev"):
-                        self.core.log(f"[BLOCKS] Rejeitado: bloco nao corresponde ao header de {host}")
-                        return
-                self._blocks_sync.extend(blocks)
-                prox = int(blocks[-1].get("height", 0)) + 1
-                faltam = int(self._headers_sync[-1].get("height", 0)) - prox + 1
-                if faltam > 0:
-                    self._enfileirar(host, {"type": "get_blocks", "start": prox})
-                    return
-                # Headers e blocos completos: entrega a chain ao consenso existente
-                with self.core.bc.lock:
-                    local = list(self.core.bc.chain)
-                if local:
-                    base = local
-                    if self._blocks_sync and int(self._blocks_sync[0].get("height", -1)) <= int(local[-1].get("height", -1)):
-                        self._blocks_sync = [b for b in self._blocks_sync if int(b.get("height", -1)) > int(local[-1].get("height", -1))]
-                    candidate = base + list(self._blocks_sync)
-                else:
-                    candidate = list(self._blocks_sync)
-                if candidate and self.core.bc.accept_chain(candidate):
-                    self.core.log("[SYNC] Headers-first concluido: altura " + str(candidate[-1].get("height")))
-                    self.core.schedule_refresh()
-                else:
-                    self.core.log(f"[SYNC] Headers-first rejeitado por consenso: {host}")
-                self._headers_sync = []
-                self._blocks_sync = []
-                self._headers_sync_peer = None
-                self._headers_sync_total = 0
-                # Pede proximos headers IMEDIATAMENTE (sync continuo)
-                try:
-                    with self.core.bc.lock:
-                        _h = self.core.bc.height()
-                    self._enfileirar(host, {"type": "get_headers", "start": _h + 1})
-                    self._sync_in_progress = True
-                except Exception:
-                    self._sync_in_progress = False
             elif typ == "get_mempool":
                 with self.core.bc.lock:
                     self._enfileirar(host, {"type": "mempool", "tx": list(self.core.bc.mempool[:1000])})
+            elif typ == "mempool":
+                # Recebeu TXs do peer -> tenta adicionar
+                txs = msg.get("tx", [])
+                novas = 0
+                for tx in txs:
+                    txid = tx.get("id")
+                    if not txid:
+                        continue
+                    with self.seen_lock:
+                        if txid in self.seen_txs:
+                            continue
+                        self.seen_txs.add(txid)
+                    if self.core.bc.add_transaction(tx, _broadcast=False):
+                        novas += 1
+                if novas > 0:
+                    self.core.log(f"[P2P] Mempool: +{novas} TXs de {host}")
+                    self.core.schedule_refresh()
             elif typ == "get_hashrate":
                 self._enfileirar(host, {"type": "hashrate", "hashrate": self.core.bc.hashrate_rede(), "difficulty": self.core.bc.difficulty(), "next_difficulty": self.core.bc.target_difficulty()})
             elif typ == "tx":
@@ -3059,7 +3135,8 @@ class Network:
             elif typ == "addr":
                 for p in msg.get("addrs", [])[:MAX_PEERS]:
                     self.add_peer(p, outbound=True)
-            # else: removido para evitar loop de "ok"
+            else:
+                self._enfileirar(host, {"type": "ok"})
         except Exception as e:
             self.core.log(f"[P2P] ERRO processar {host}: {e}")
 
@@ -3078,8 +3155,7 @@ class Network:
                 "hashrate": self.core.bc.hashrate_rede(),
                 "peers": list(self.peers)[:MAX_PEERS],
                 "user_agent": f"DogKong-v2/{VERSION}",
-                "is_hub": HUB_MODE, "is_seed": SEED_ONLY,
-                "is_principal": SOU_PRINCIPAL, "onion": self.onion_address,
+                "onion": self.onion_address,
             }
             raw = json.dumps(hello, separators=(",", ":")).encode()
             sock.sendall(len(raw).to_bytes(4, "big") + raw)
@@ -3115,6 +3191,8 @@ class Network:
     def _receber_msg(self, sock, timeout=None):
         if timeout:
             sock.settimeout(timeout)
+        else:
+            sock.settimeout(15.0)  # anti-DoS: nunca prender thread
         cab = b""
         while len(cab) < 4:
             p = sock.recv(4 - len(cab))
@@ -3202,7 +3280,13 @@ class Network:
             self.core.log(f"[P2P] PEER_ACTIVE {host} | Conexoes: {len(self.active_connections)}/{MAX_ACTIVE_CONNS}")
             self._iniciar_reader(host, c)
             self._iniciar_writer(host)
-            # Manda lista de peers pro novo peer
+            # Pede a mempool do peer (sincroniza TXs)
+            try:
+                self._enfileirar(host, {"type": "get_mempool"})
+                self.core.log(f"[P2P] Pedindo mempool para {host}")
+            except Exception:
+                pass
+            # Pede lista de peers
             try:
                 with self.lock:
                     lst = list(self.peers.keys())[:50]
@@ -3293,10 +3377,8 @@ class Network:
                 pass
         if isinstance(seeds, dict):
             self.seeds = [s for s in seeds.get("dns", []) if isinstance(s, str)]
-            self.irc_servers = []
         else:
             self.seeds = [s for s in seeds if isinstance(s, str)]
-            self.irc_servers = list(IRC_SERVERS)
         for ip in HARDCODED_IPS:
             if ip not in self.seeds:
                 self.seeds.append(ip)
@@ -3322,23 +3404,24 @@ class Network:
             s = self._conectar(host)
             if not s:
                 return False
-            # So pede chain se ja temos altura menor que o peer
             with self.lock:
                 info = self.peers.get(host, {})
                 altura_peer = info.get("last_height", 0)
-            if altura_peer > 0 and altura_peer <= self.core.bc.height():
+                last_hash_peer = info.get("last_hash")
+            altura_local = self.core.bc.height()
+            last_hash_local = (self.core.bc.last_block() or {}).get("hash", "0" * 64)
+            # Pede chain se: peer mais alto, OU peer na mesma altura mas com hash diferente (fork)
+            precisa = False
+            if altura_peer > 0 and altura_peer > altura_local:
+                precisa = True
+            elif altura_peer == altura_local and last_hash_peer and last_hash_peer != last_hash_local:
+                precisa = True
+                self.core.log(f"[SYNC] FORK detectado com {host} (mesma altura, hash diferente)")
+            if not precisa:
                 return True
-            self.core.log(f"[SYNC] Pedindo chain para {host} (local={self.core.bc.height()} peer={altura_peer})")
-            # Apenas UM peer pode executar headers-first por vez
-            if self._sync_in_progress:
-                self.core.log(f'[SYNC] Ignorando {host}: outro peer ja esta sincronizando')
-                return True
-            self._sync_in_progress = True
-            self._headers_sync = []
-            self._blocks_sync = []
-            self._headers_sync_peer = host
-            self._headers_sync_total = 0
-            self._enfileirar(host, {"type": "get_headers", "start": max(0, self.core.bc.height() + 1)})
+            ponto_partida = max(0, altura_local - 10)
+            self.core.log(f"[SYNC] Pedindo blocos de #{ponto_partida} para {host} (local={altura_local} peer={altura_peer})")
+            self._enfileirar(host, {"type": "get_chain", "desde": ponto_partida})
             return True
         except Exception as e:
             self.core.log(f"[P2P] SYNC ERRO {host}: {e}")
@@ -3402,7 +3485,7 @@ class Network:
         if ip:
             self.public_ip = ip
             self.meu_ip = ip
-            self.core.log(f"[P2P] IP publico: {ip}:{P2P_PORT}")
+            self.core.log("[P2P] IP publico detectado")
 
     def _is_banned(self, host):
         with self.ban_lock:
@@ -3495,21 +3578,53 @@ class MinerBridge:
             self.core.log(f"[MINER] Erro no accept: {e}")
 
     def _receber(self):
-        """Recebe nonce + hash do minerador."""
+        """Recebe nonce + hash do minerador. Auto-reconecta se cair."""
         buffer = b""
         while self.rodando:
             try:
+                if not self.socket_client:
+                    break
                 dados = self.socket_client.recv(65536)
                 if not dados:
-                    self.core.log("[MINER] Minerador desconectou")
+                    self.core.log("[MINER] Minerador desconectou - tentando reconectar em 5s")
                     break
                 buffer += dados
                 while b"\n" in buffer:
                     linha, buffer = buffer.split(b"\n", 1)
-                    self._processar_resultado(linha.decode().strip())
+                    try:
+                        self._processar_resultado(linha.decode().strip())
+                    except Exception as pe:
+                        self.core.log(f"[MINER] Erro processar: {pe}")
             except Exception as e:
                 self.core.log(f"[MINER] Erro no recv: {e}")
                 break
+        # Reconecta se ainda tiver rodando
+        if self.rodando:
+            try:
+                self.socket_client = None
+                self.minerando = False
+            except:
+                pass
+            def _retry():
+                import time as _t
+                while self.rodando:
+                    _t.sleep(5)
+                    try:
+                        # Ressuscita o C++ se morreu
+                        if self.processo is None or self.processo.poll() is not None:
+                            self.core.log("[MINER] dogkong_miner.exe morto - reiniciando")
+                            self.iniciar_minerador()
+                        if self.socket_server:
+                            self.socket_server.settimeout(30)
+                            self.socket_client, addr = self.socket_server.accept()
+                            self.socket_client.settimeout(None)
+                            self.core.log(f"[MINER] Reconectado: {addr}")
+                            self.thread_receber = threading.Thread(target=self._receber, daemon=True)
+                            self.thread_receber.start()
+                            return
+                    except Exception:
+                        pass
+            threading.Thread(target=_retry, daemon=True).start()
 
     def _processar_resultado(self, linha):
         """Processa o nonce + hash recebido do minerador."""
@@ -3542,7 +3657,6 @@ class MinerBridge:
                 "bits": template["bits"],
                 "nonce": nonce,
                 "miner": template["miner"],
-                "chain_id": CHAIN_ID,
                 "tx": [coinbase] + mempool_txs,
                 "hash": hash_final,
                 "peers": [],
@@ -3555,13 +3669,21 @@ class MinerBridge:
                 self.core.log("[MINER] PoW invalido, descartando")
                 self.minerar()
                 return
-            if not self.core.bc.validar_bloco_antes_de_salvar(block):
-                self.core.log("[MINER] BLOCO REJEITADO: invalido — nao sera salvo")
+
+            # AUDITORIA COMPLETA: bits, timestamp, MTP, coinbase, saldo
+            tmp_chain = list(self.core.bc.chain) + [block]
+            if not self.core.bc._validar_bloco_novo(tmp_chain, len(tmp_chain) - 1):
+                self.core.log("[MINER] Bloco REJEITADO na auditoria - descartando")
+                self.minerar()
                 return
+
             self.core.bc.chain.append(block)
             used = {x.get("id") for x in block.get("tx", [])}
+            removidas = [x for x in self.core.bc.mempool if x.get("id") in used]
             self.core.bc.mempool = [x for x in self.core.bc.mempool if x.get("id") not in used]
             self.core.bc.save()
+            if removidas:
+                self.core.log(f"[MEMPOOL] {len(removidas)} TXs confirmadas removidas")
             self.core.log("*** BLOCO " + str(height) + " ***")
             self.core.log("Hash: " + hash_final)
             self.core.network.broadcast({"type": "block", "block": block})
@@ -3569,13 +3691,15 @@ class MinerBridge:
             self.minerar()
 
     def minerar(self):
-        """Manda template pro minerador."""
+        """Manda template pro minerador. Revalida chain antes."""
         with self.lock:
             if not self.socket_client:
                 self.core.log("[MINER] Minerador nao conectado")
                 return False
-            # Monta template
+            # REVALIDA: chain pode ter mudado (reorg)
             with self.core.bc.lock:
+                if not self.core.bc.chain:
+                    return False
                 height = self.core.bc.height() + 1
                 previous = dict(self.core.bc.chain[-1])
             block_time = now()
@@ -3663,6 +3787,7 @@ class DogKongCore:
         self.wallet = Wallet()
         # SEED_ONLY agora tem chain REAL (nao stub)
         self.bc = Blockchain()
+        self.bc._core_ref = self  # pra broadcast automatico
         self.logs = []
         self._refresh_queued = False
         self.global_rate = {}
@@ -3681,13 +3806,9 @@ class DogKongCore:
             pass
 
         self.network = Network(self)
-        if SOU_PRINCIPAL:
-            self.miner = None
-            self.log("[PRINCIPAL] Modo principal: minerador desativado, chain salva")
-        else:
-            self.miner = MinerBridge(self)
-            self.miner.iniciar_servidor()
-            self.miner.iniciar_minerador()
+        self.miner = MinerBridge(self)
+        self.miner.iniciar_servidor()
+        self.miner.iniciar_minerador()
 
         # ===== WATCHER DE TX DA CARTEIRA WEB =====
         threading.Thread(target=self._tx_watcher, daemon=True).start()
@@ -3779,22 +3900,47 @@ class DogKongCore:
             pass
 
     def on_close(self):
+        # 1. Para minerador e rede primeiro
         try:
-            self.miner.stop()
+            self.miner.fechar()
         except:
             pass
         try:
             self.network.shutdown()
         except:
             pass
+        # 2. Janela de aviso enquanto salva
+        try:
+            aviso = tk.Toplevel(self.root)
+            aviso.title("DogKong v2")
+            aviso.geometry("320x100")
+            aviso.transient(self.root)
+            aviso.grab_set()
+            aviso.resizable(False, False)
+            tk.Label(aviso, text="Salvando banco de dados...",
+                     font=("Arial", 11, "bold")).pack(pady=20)
+            tk.Label(aviso, text="Aguarde, nao feche.", font=("Arial", 9)).pack()
+            aviso.update()
+        except:
+            aviso = None
+        # 3. Salva (com a janela ainda aberta)
         try:
             with self.bc.lock:
                 save_json(CHAIN_FILE, self.bc.chain)
                 save_json(MEMPOOL_FILE, self.bc.mempool)
-        except:
-            pass
+        except Exception as e:
+            try:
+                messagebox.showerror("DogKong v2", f"Erro ao salvar: {e}")
+            except:
+                pass
         try:
             self.wallet.save()
+        except:
+            pass
+        # 4. Fecha aviso + janela principal
+        try:
+            if aviso:
+                aviso.destroy()
         except:
             pass
         try:
@@ -3836,7 +3982,7 @@ class DogKongCore:
                 if int(block.get("time", 0)) > now() + MAX_FUTURE_TIME:
                     self.network.ban_peer(from_host, 3600)
                     return
-                if int(block.get("time", 0)) < int(bc.chain[-1].get("time", 0)):
+                if int(block.get("time", 0)) <= int(bc.chain[-1].get("time", 0)):
                     return
                 if int(block.get("time", 0)) > int(bc.chain[-1].get("time", 0)) + MAX_FUTURE_TIME:
                     return
@@ -3844,11 +3990,6 @@ class DogKongCore:
                     return
                 if not bc.valid_pow(block):
                     return
-                # HARDFORK: chain_id obrigatorio apos HARDFORK_HEIGHT
-                if height >= HARDFORK_HEIGHT:
-                    if block.get("chain_id") != CHAIN_ID:
-                        self.log(f"Bloco #{height} SEM chain_id apos hardfork -> REJEITADO")
-                        return
                 bits_recebidos = int(block["bits"])
                 bits_esperados = bc.target_difficulty(candidate_time=int(block["time"]))
                 if bits_recebidos != bits_esperados:
@@ -3861,11 +4002,14 @@ class DogKongCore:
                 if not txs:
                     return
                 coinbases = 0
+                taxas_bloco = 0.0
+                coinbase_tx = None
                 for tx in txs:
                     if tx.get("from") == "COINBASE":
                         coinbases += 1
-                        if abs(float(tx.get("amount", -1)) - block_reward(height)) > 1e-8:
+                        if coinbases > 1:
                             return
+                        coinbase_tx = tx
                         continue
                     try:
                         pub = bytes.fromhex(tx["pubkey"])
@@ -3877,15 +4021,28 @@ class DogKongCore:
                         return
                     if not verify(pub, tx["id"], tx["signature"]):
                         return
+                    taxas_bloco += float(tx.get("fee", 0))
                 if coinbases != 1:
                     return
-                if not bc.validar_bloco_antes_de_salvar(block):
-                    self.log("[BLOCK] BLOCO REJEITADO: invalido — nao sera salvo")
+                # Coinbase = reward + taxas (igual Bitcoin/Dogecoin)
+                esperado_cb = block_reward(height) + taxas_bloco
+                if abs(float(coinbase_tx.get("amount", -1)) - esperado_cb) > 1e-6:
+                    self.log(f"Bloco #{height} rejeitado: coinbase {coinbase_tx.get('amount')} != {esperado_cb}")
                     return
+
+                # AUDITORIA DE SALDO: aplica o bloco numa copia e valida
+                tmp_chain = list(bc.chain) + [block]
+                if not bc._validar_bloco_novo(tmp_chain, len(tmp_chain) - 1):
+                    self.log(f"Bloco #{height} rejeitado: falhou na auditoria de gastos.")
+                    return
+
                 bc.chain.append(block)
                 used = {x.get("id") for x in txs}
+                removidas = [x for x in bc.mempool if x.get("id") in used]
                 bc.mempool = [x for x in bc.mempool if x.get("id") not in used]
                 bc.save()
+                if removidas:
+                    self.log(f"[MEMPOOL] {len(removidas)} TXs confirmadas removidas")
                 add_notificacao(f"Bloco #{height} recebido de {from_host}")
                 self.log(
                     f"Bloco #{height} de {from_host} | bits 0x{block['bits']:08X} | "
@@ -3935,11 +4092,11 @@ class DogKongCore:
         menu.add_cascade(label=t("settings_menu"), menu=settings)
 
         notifmenu = tk.Menu(menu, tearoff=0)
-        notifmenu.add_command(label="View notifications", command=self.mostrar_notificacoes)
-        notifmenu.add_command(label="Clear notifications", command=self.limpar_notificacoes)
+        notifmenu.add_command(label="Ver notificacoes", command=self.mostrar_notificacoes)
+        notifmenu.add_command(label="Limpar notificacoes", command=self.limpar_notificacoes)
         self.notifmenu = notifmenu
         self.notif_index = menu.index(tk.END) + 1
-        menu.add_cascade(label="Notification", menu=self.notifmenu)
+        menu.add_cascade(label="Notificacao", menu=self.notifmenu)
         self._menu_ref = menu
 
         helpmenu = tk.Menu(menu, tearoff=0)
@@ -3966,7 +4123,7 @@ class DogKongCore:
         bar.pack(fill=tk.X)
 
         buttons = [
-            ("Update", self.enviar_atualizacao),
+            (t("overview"), self.overview),
             (t("send"), self.send_page),
             (t("receive"), self.receive_page),
             (t("transactions"), self.transactions),
@@ -3978,8 +4135,6 @@ class DogKongCore:
                 bar, text=text, command=cmd,
                 relief=tk.RAISED, width=9, font=("Arial", 8)
             ).pack(side=tk.LEFT, padx=1, pady=3)
-            if text == "Update":
-                self.btn_update = bar.winfo_children()[-1]
 
         tk.Button(
             bar,
@@ -4020,13 +4175,6 @@ class DogKongCore:
         self.btn_start.pack(side=tk.RIGHT, padx=2)
 
     def update_mining_buttons(self):
-        if self.miner is None:
-            try:
-                self.btn_start.config(bg="#7f8c8d", activebackground="#7f8c8d", state="disabled")
-                self.btn_stop.config(bg="#7f8c8d", activebackground="#7f8c8d", state="disabled")
-            except Exception:
-                pass
-            return
         if self.miner.is_running():
             self.btn_start.config(bg="#27ae60", activebackground="#2ecc71")
             self.btn_stop.config(bg="#27ae60", activebackground="#2ecc71")
@@ -4088,12 +4236,16 @@ class DogKongCore:
             self.show_unlock_screen()
             return
 
-        bal = self.bc.balance(self.wallet.address, min_conf=1)
+        bal = self.bc.saldo_com_pendentes(self.wallet.address, min_conf=1)
+        pendente = self.bc.saldo_pendente_saindo(self.wallet.address)
         frame = tk.Frame(self.content, bg="#ece9e2")
         frame.pack(fill=tk.BOTH, expand=True)
 
         tk.Label(frame, text=t("balance"), font=("Arial", 10), bg="#ece9e2").pack(anchor="w", pady=(2, 0))
         tk.Label(frame, text=f"{bal:.8f} DOGK", font=("Arial", 16, "bold"), bg="#ece9e2").pack(anchor="w")
+        if pendente > 0:
+            tk.Label(frame, text=f"({pendente:.8f} DOGK pendente)",
+                     font=("Arial", 9, "italic"), fg="#e67e22", bg="#ece9e2").pack(anchor="w")
 
         net = tk.LabelFrame(frame, text="Rede DogKong v2", bg="#ece9e2")
         net.pack(fill=tk.X, pady=4)
@@ -4102,7 +4254,7 @@ class DogKongCore:
             peers = len(self.network.peers)
 
         hashrate_rede = self.bc.hashrate_rede()
-        hashrate_local = self.miner.hashrate_local() if self.miner is not None else 0.0
+        hashrate_local = self.miner.hashrate_local()
         bits_atual = self.bc.difficulty()
         bits_prox = self.bc.target_difficulty()
 
@@ -4269,8 +4421,11 @@ class DogKongCore:
                 if f < MIN_FEE:
                     messagebox.showerror("DogKong v2", f"Min {MIN_FEE}")
                     return
-                if self.bc.balance(self.wallet.address, min_conf=6) < value + f:
-                    messagebox.showerror("DogKong v2", t("insufficient"))
+                saldo_6conf = self.bc.saldo_com_pendentes(self.wallet.address, min_conf=6)
+                if saldo_6conf < value + f:
+                    messagebox.showerror("DogKong v2",
+                        f"Saldo com 6 confirmacoes: {saldo_6conf:.8f} DOGK\n\n"
+                        "Aguarde mais blocos serem minerados.")
                     return
                 tx = make_tx(self.wallet, to, value, f)
                 if not self.bc.add_transaction(tx):
@@ -4381,7 +4536,7 @@ class DogKongCore:
         top.pack(fill=tk.X, pady=2)
 
         hashrate_rede = self.bc.hashrate_rede()
-        hashrate_local = self.miner.hashrate_local() if self.miner is not None else 0.0
+        hashrate_local = self.miner.hashrate_local()
         bits_atual = self.bc.difficulty()
         bits_prox = self.bc.target_difficulty()
 
@@ -4402,9 +4557,7 @@ class DogKongCore:
         info.pack(fill=tk.X, pady=4)
 
         limite_txt = "(sem limite)"
-        if self.miner is None:
-            limite_txt = "(PRINCIPAL - nao minera)"
-        elif self.miner.hashrate_alvo > 0:
+        if self.miner.hashrate_alvo > 0:
             limite_txt = f"{self.miner.hashrate_alvo:.0f} H/s"
         elif self.miner.hashrate_pc > 0:
             limite_txt = f"{self.miner.hashrate_pc:.0f} H/s (100%)"
@@ -4507,80 +4660,6 @@ class DogKongCore:
         self.miner.hashrate_alvo = 0.0
         self.log("Limite de H/s resetado. Proximo Minerar vai perguntar de novo.")
 
-    def enviar_atualizacao(self):
-        # DOGK_UPDATE_SENHA - pede senha antes de abrir
-        senha = simpledialog.askstring("DogKong - Update", "Senha de administrador:", show="*")
-        if senha != UPDATE_PASSWORD:
-            messagebox.showerror("DogKong", "Senha incorreta!")
-            self.log("Tentativa de Update com senha errada")
-            return
-        win = tk.Toplevel(self.root)
-        win.title("DogKong - Update")
-        win.geometry("520x320")
-        win.transient(self.root)
-        win.grab_set()
-        tk.Label(win, text="Mensagem (max 200):", font=("Arial", 10, "bold")).pack(anchor="w", padx=10, pady=(10, 2))
-        txt_msg = tk.Text(win, height=5, width=60, font=("Courier", 9))
-        txt_msg.pack(padx=10, pady=2)
-        tk.Label(win, text="Link (opcional):", font=("Arial", 10, "bold")).pack(anchor="w", padx=10, pady=(8, 2))
-        txt_link = tk.Entry(win, width=60, font=("Courier", 9))
-        txt_link.pack(padx=10, pady=2)
-        txt_link.insert(0, "https://")
-        def enviar():
-            msg = txt_msg.get("1.0", tk.END).strip()
-            link = txt_link.get().strip()
-            if not msg:
-                messagebox.showerror("DogKong", "Mensagem vazia")
-                return
-            if len(msg) > 200:
-                messagebox.showerror("DogKong", "Max 200 chars")
-                return
-            if link == "https://":
-                link = ""
-            self.network.broadcast({"type": "notify", "text": msg, "link": link})
-            full = f"[LOCAL] {msg}"
-            if link:
-                full += f" | {link}"
-            add_notificacao(full)
-            self.log(f"Update enviado: {msg[:50]}...")
-            self.update_blink()
-            messagebox.showinfo("DogKong", "Update enviado para a rede!")
-            win.destroy()
-        tk.Button(win, text="ENVIAR", command=enviar, bg="#e74c3c", fg="white", font=("Arial", 11, "bold"), width=20, height=2).pack(pady=12)
-
-    def update_blink(self):
-        try:
-            self._blink_count = 10
-            self._blink_state = True
-            self._blink_step()
-        except Exception as e:
-            print(f"[BLINK] erro: {e}")
-
-    def _blink_step(self):
-        try:
-            if not hasattr(self, "_blink_count") or self._blink_count <= 0:
-                try:
-                    self.btn_update.config(bg="#e74c3c", activebackground="#c0392b")
-                except Exception:
-                    pass
-                return
-            self._blink_count -= 1
-            if self._blink_state:
-                try:
-                    self.btn_update.config(bg="#ff0000", activebackground="#ff0000")
-                except Exception:
-                    pass
-            else:
-                try:
-                    self.btn_update.config(bg="#e74c3c", activebackground="#c0392b")
-                except Exception:
-                    pass
-            self._blink_state = not self._blink_state
-            self.root.after(300, self._blink_step)
-        except Exception:
-            pass
-
-
     def sync(self):
         threading.Thread(target=self.sync_thread, daemon=True).start()
 
@@ -4594,12 +4673,6 @@ class DogKongCore:
         self.schedule_refresh()
 
     def start_mining(self):
-        if SOU_PRINCIPAL:
-            messagebox.showinfo("DogKong v2", "This node is PRINCIPAL. It does not mine, only saves blocks.")
-            return
-        if SEED_ONLY:
-            messagebox.showinfo("DogKong v2", "This node is seed only. It does not mine.")
-            return
         if self.wallet.is_locked():
             messagebox.showerror("DogKong v2", "Unlock the wallet first.")
             return
@@ -4623,7 +4696,7 @@ class DogKongCore:
         import time as _time
         ultimo_time = int(self.bc.chain[-1].get("time", 0)) if self.bc.chain else 0
         atraso = _time.time() - ultimo_time
-        if atraso > 86400:
+        if atraso > 999999999:
             messagebox.showerror("DogKong v2",
                 f"Chain outdated ({int(atraso)}s without block).\n"
                 f"Wait for the sync before mining.\n"
@@ -4644,7 +4717,7 @@ class DogKongCore:
     def marcar_notif_nova(self):
         try:
             idx = self._menu_ref.index("Notificacao")
-            self._menu_ref.entryconfig(idx, label="(!) Notification")
+            self._menu_ref.entryconfig(idx, label="(!) Notificacao")
             print("[MENU] Notificacao marcada!", flush=True)
         except Exception as e:
             print(f"[MENU] ERRO: {e}", flush=True)
@@ -4652,19 +4725,10 @@ class DogKongCore:
     def limpar_marca_notif(self):
         try:
             idx = self._menu_ref.index("(!) Notificacao")
-            self._menu_ref.entryconfig(idx, label="Notification")
+            self._menu_ref.entryconfig(idx, label="Notificacao")
             print("[MENU] Notificacao limpa.", flush=True)
         except:
             pass
-
-    def _copiar_link(self, url):
-        try:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(url)
-            self.root.update()
-            messagebox.showinfo("DogKong", f"Link copied:\\n{url}")
-        except Exception as e:
-            messagebox.showerror("DogKong", f"Erro: {e}")
 
     def _abrir_url(self, url):
         import webbrowser
@@ -4672,10 +4736,10 @@ class DogKongCore:
 
     def mostrar_notificacoes(self):
         win = tk.Toplevel(self.root)
-        win.title("Notifications")
+        win.title("Notificacoes")
         win.geometry("620x520")
         win.configure(bg="#ece9e2")
-        tk.Label(win, text="Notifications", font=("Arial", 14, "bold"), bg="#ece9e2").pack(pady=10)
+        tk.Label(win, text="Notificacoes", font=("Arial", 14, "bold"), bg="#ece9e2").pack(pady=10)
         canvas = tk.Canvas(win, bg="#ece9e2")
         scrollbar = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
         frame = tk.Frame(canvas, bg="#ece9e2")
@@ -4689,13 +4753,13 @@ class DogKongCore:
             with open(NOTIF_FILE, "r", encoding="utf-8") as f:
                 conteudo = f.read()
             if not conteudo.strip():
-                conteudo = "(no notifications)"
+                conteudo = "(sem notificacoes)"
         except FileNotFoundError:
-            conteudo = "(no notifications)"
+            conteudo = "(sem notificacoes)"
         if True:
             linhas = conteudo.splitlines()
             if not linhas:
-                tk.Label(frame, text="(no notifications)", bg="#ece9e2").pack(pady=20)
+                tk.Label(frame, text="(sem notificacoes)", bg="#ece9e2").pack(pady=20)
             else:
                 for linha in reversed(linhas):
                     linha = linha.strip()
@@ -4710,27 +4774,11 @@ class DogKongCore:
                     if m:
                         txid = m.group(1)
                         url = "https://dogkong.duckdns.org/search?q=" + txid
-                        tk.Button(bloco, text="Open in Explorer",
+                        tk.Button(bloco, text="Abrir no Explorer",
                                   bg="#3498db", fg="white",
                                   font=("Arial", 8, "bold"),
                                   command=lambda u=url: self._abrir_url(u)
                                   ).pack(anchor="w", padx=6, pady=(0, 6))
-                    # DOGK_LINK_CLICK_APPLIED - detetar link
-                    ml = _re.search(r'(https?://[^\s|]+)', linha)
-                    if ml:
-                        link_url = ml.group(1)
-                        frame_btns = tk.Frame(bloco, bg="white")
-                        frame_btns.pack(anchor="w", padx=6, pady=(0, 6))
-                        tk.Button(frame_btns, text="Open Link",
-                                  bg="#27ae60", fg="white",
-                                  font=("Arial", 8, "bold"),
-                                  command=lambda u=link_url: self._abrir_url(u)
-                                  ).pack(side=tk.LEFT, padx=2)
-                        tk.Button(frame_btns, text="Copy Link",
-                                  bg="#f39c12", fg="white",
-                                  font=("Arial", 8, "bold"),
-                                  command=lambda u=link_url: self._copiar_link(u)
-                                  ).pack(side=tk.LEFT, padx=2)
         self.limpar_marca_notif()
         try:
             flag = NOTIF_FILE + ".new"
@@ -4738,13 +4786,13 @@ class DogKongCore:
                 os.remove(flag)
         except:
             pass
-        tk.Button(win, text="Close", command=win.destroy, bg="#d9534f", fg="white").pack(pady=10)
+        tk.Button(win, text="Fechar", command=win.destroy, bg="#d9534f", fg="white").pack(pady=10)
 
     def limpar_notificacoes(self):
         try:
             with open(NOTIF_FILE, "w", encoding="utf-8") as f:
                 f.write("")
-            messagebox.showinfo("Notifications", "Notifications cleared!")
+            messagebox.showinfo("Notificacoes", "Notificacoes limpas!")
         except Exception as e:
             messagebox.showerror("Erro", str(e))
 
@@ -5020,16 +5068,16 @@ class DogKongCore:
             hashrate_rede = self._cache_refresh.get("hashrate_rede", 0.0)
             with self.network.lock:
                 peers = len(self.network.peers)
-            if self.miner is not None and self.miner.is_running():
+            if self.miner.is_running():
                 rate = self.miner.hashrate_local()
                 mining = f" | Local: {self._fmt_hashrate(rate)}"
-            elif self.miner is None:
-                mining = " | PRINCIPAL"
             else:
                 mining = " | OFF"
             lock = "LOCK " if self.wallet.is_locked() else ""
+            hgt_efetivo = self.bc.bloco_efetivo()
+            prefixo = "" if hgt_efetivo == hgt else f"(#{hgt_efetivo}) "
             self.status.set(
-                f"{lock}DOGK v2 | Peers: {peers} | #{hgt} | "
+                f"{lock}{prefixo}DOGK v2 | Peers: {peers} | #{hgt} | "
                 f"Bits: 0x{bits:08X}->0x{next_bits:08X} | "
                 f"Rede: {self._fmt_hashrate(hashrate_rede)}{mining}"
             )
@@ -5068,7 +5116,7 @@ class DogKongCore:
         self.log(f"Dificuldade Bitcoin-style: bits 0x{INITIAL_DIFFICULTY:08X} "
                  f"janela LWMA={DIFFICULTY_WINDOW}")
         self.log(f"Anti-travamento: ativa apos {BLOCK_TIME * STALL_TIME_MULT}s")
-        self.log(f"Protocolo: v{PROTOCOL_VERSION} | Argon2: {USE_ARGON2}")
+        self.log(f"Protocolo: v{PROTOCOL_VERSION} | Argon2: {USE_ARGON2} | AES: {_HAS_AES}")
         self.log(f"Idioma: {LANGUAGES.get(LANG, LANG)}")
         self.log("Rede pronta")
         self.update_mining_buttons()
@@ -5090,6 +5138,7 @@ if __name__ == "__main__":
                     self.wallet = Wallet()
                     # SEED_ONLY agora tem chain REAL (nao stub)
                     self.bc = Blockchain()
+                    self.bc._core_ref = self
                     self.miner = None
                     self.logs = []
                     self.global_rate = {}
@@ -5097,15 +5146,13 @@ if __name__ == "__main__":
                     self.network = Network(self)
                     threading.Thread(target=self._tx_watcher, daemon=True).start()
                     threading.Thread(target=self.initial_sync, daemon=True).start()
-                    if SOU_PRINCIPAL:
-                        self.log("[PRINCIPAL] Modo principal: nao minera, sincroniza e serve chain")
-                    elif SEED_ONLY:
-                        self.log("[SEED] Modo seed: nao minera, descobre peers e serve chain")
-                    else:
-                        self.log("[PEER] Modo peer: minerador C++ indisponivel em CLI")
+                    self.log("[CLI] No ativo. Minerador C++ nao roda no modo texto.")
 
-                def log(self, text):
-                    print(f"[{time.strftime('%H:%M:%S')}] {text}", flush=True)
+                def log(self, text, *args, **kwargs):
+                    try:
+                        print(f"[{time.strftime('%H:%M:%S')}] {text}", flush=True)
+                    except Exception:
+                        pass
 
                 def schedule_refresh(self):
                     pass
@@ -5167,7 +5214,12 @@ if __name__ == "__main__":
                             else:
                                 return
                         else:
+                            # Timestamp estritamente maior
+                            if int(block.get("time", 0)) <= int(bc.chain[-1].get("time", 0)):
+                                return
                             if int(block.get("time", 0)) > now() + MAX_FUTURE_TIME:
+                                return
+                            if int(block.get("time", 0)) > int(bc.chain[-1].get("time", 0)) + MAX_FUTURE_TIME:
                                 return
                             if block.get("prev") != bc.chain[-1]["hash"]:
                                 return
@@ -5177,15 +5229,50 @@ if __name__ == "__main__":
                             bits_esperados = bc.target_difficulty(candidate_time=int(block.get("time", 0)))
                             if bits_recebidos != bits_esperados:
                                 return
-                            if not bc.validar_bloco_antes_de_salvar(block):
-                                self.log("[BLOCK] BLOCO REJEITADO: invalido — nao sera salvo")
+                            txs = block.get("tx", [])
+                            if not txs:
                                 return
+                            coinbases = 0
+                            taxas_bloco = 0.0
+                            coinbase_tx = None
+                            for tx in txs:
+                                if tx.get("from") == "COINBASE":
+                                    coinbases += 1
+                                    if coinbases > 1:
+                                        return
+                                    coinbase_tx = tx
+                                    continue
+                                try:
+                                    pub = bytes.fromhex(tx["pubkey"])
+                                except Exception:
+                                    return
+                                if address_from_pub(pub) != tx["from"]:
+                                    return
+                                if h(tx_message(tx).encode()) != tx["id"]:
+                                    return
+                                if not verify(pub, tx["id"], tx["signature"]):
+                                    return
+                                taxas_bloco += float(tx.get("fee", 0))
+                            if coinbases != 1:
+                                return
+                            esperado_cb = block_reward(height) + taxas_bloco
+                            if abs(float(coinbase_tx.get("amount", -1)) - esperado_cb) > 1e-6:
+                                self.log(f"Bloco #{height} rejeitado: coinbase com taxa errada")
+                                return
+
+                            # AUDITORIA DE SALDO (mesma do GUI)
+                            tmp_chain = list(bc.chain) + [block]
+                            if not bc._validar_bloco_novo(tmp_chain, len(tmp_chain) - 1):
+                                self.log(f"Bloco #{height} rejeitado: auditoria de gastos")
+                                return
+
                             bc.chain.append(block)
-                            used = {x.get("id") for x in block.get("tx", [])}
+                            used = {x.get("id") for x in txs}
                             bc.mempool = [x for x in bc.mempool if x.get("id") not in used]
                             bc.save()
                     if precisa_sync:
                         self.network.sync_chain(from_host)
+
 
                 def run(self):
                     self.log("No ativo (CLI). Rodando...")
@@ -5221,9 +5308,6 @@ if __name__ == "__main__":
             except:
                 print(e)
             traceback.print_exc()
-
-
-
 
 
 
