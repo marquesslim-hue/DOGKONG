@@ -2,7 +2,7 @@
 
 
 ## 📥 Download
-https://github.com/marquesslim-hue/DOGKONG/releases/download/v9.5/DogKong.v9.5.exe.rar
+https://github.com/marquesslim-hue/DOGKONG/releases/download/v9.6/dogkong.v9.6_core.exe.rar
 
 Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 
@@ -34,7 +34,7 @@ Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 ---
 
 ## 📥 Download
-https://github.com/marquesslim-hue/DOGKONG/releases/download/v9.5/DogKong.v9.5.exe.rar
+https://github.com/marquesslim-hue/DOGKONG/releases/download/v9.6/dogkong.v9.6_core.exe.rar
 
 Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 
