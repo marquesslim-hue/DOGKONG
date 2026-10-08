@@ -6,7 +6,7 @@ https://github.com/marquesslim-hue/DOGKONG/releases/download/V10/DogKong.v10.exe
 
 Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 
-# 🐕🦍 DogKong V9.5
+# 🐕🦍 DogKong V10
 
 > ## ⚠️⚠️⚠️ WARNING ⚠️⚠️⚠️
 >
