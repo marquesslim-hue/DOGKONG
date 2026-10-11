@@ -1,12 +1,11 @@
-07/10/2026
-
+11/10/2026
 
 ## 📥 Download
-https://github.com/marquesslim-hue/DOGKONG/releases/download/V10/DogKong.v10.exe.rar
+https://github.com/marquesslim-hue/DOGKONG/releases/download/v11/DogKongv11.exe.rar
 
 Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 
-# 🐕🦍 DogKong V10
+# 🐕🦍 DogKong V11
 
 > ## ⚠️⚠️⚠️ WARNING ⚠️⚠️⚠️
 >
@@ -34,7 +33,7 @@ Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 ---
 
 ## 📥 Download
-https://github.com/marquesslim-hue/DOGKONG/releases/download/V10/DogKong.v10.exe.rar
+https://github.com/marquesslim-hue/DOGKONG/releases/download/v11/DogKongv11.exe.rar
 
 Latest version: [Releases](https://github.com/marquesslim-hue/DOGKONG/releases)
 
